@@ -1,3 +1,4 @@
+#include "bw_query.h"
 #include "bwg_new.h"
 
 void bw_op_clearz(bwStepOpData * data) {

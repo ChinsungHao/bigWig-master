@@ -1,4 +1,4 @@
-#include "bwg_new.h"
+#include "bwgExtra.h"
 
 /* Adapted from Kent source (included jkweb folder) to not perform clipping */
 

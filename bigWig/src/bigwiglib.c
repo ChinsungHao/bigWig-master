@@ -84,21 +84,3 @@ int * bigwig_readi(bigWig_t * bw, const char * chrom, int start, int end, int st
 
 
 //Jinsong
-struct bbiFile *bigWigFileOpen(char *fileName)
-/* Open up big wig file. */
-{
-    return -1;
-}
-
-struct bbiInterval *bigWigIntervalQuery(struct bbiFile *bwf, char *chrom, bits32 start, bits32 end,
-                                        struct lm *lm){
-    return -1;
-}
-
-boolean isBigWig(char *fileName)
-/* Peak at a file to see if it's bigWig */
-{
-    return 0;
-}
-
-void udcSetDefaultDir(char *path);

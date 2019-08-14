@@ -3,7 +3,7 @@
 
 */
 #include "bwg_new.h"
-
+#include "bwgExtra.h"
 
 typedef struct bbiFile bigWig_t;
 
