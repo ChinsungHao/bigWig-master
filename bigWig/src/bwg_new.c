@@ -3,9 +3,577 @@
 #include <stdbool.h>
 #include "bwg_new.h"
 
+//begin of linefile.c
+char *getFileNameFromHdrSig(char *m)
+/* Check if header has signature of supported compression stream,
+   and return a phoney filename for it, or NULL if no sig found. */
+{
+    char buf[20];
+    char *ext=NULL;
+    if (startsWith("\x1f\x8b",m)) ext = "gz";
+    else if (startsWith("\x1f\x9d\x90",m)) ext = "Z";
+    else if (startsWith("BZ",m)) ext = "bz2";
+    else if (startsWith("PK\x03\x04",m)) ext = "zip";
+    if (ext==NULL)
+        return NULL;
+    safef(buf, sizeof(buf), "somefile.%s", ext);
+    return cloneString(buf);
+}
 
-//begin of bwgCreat.c
+static void metaDataAdd(struct lineFile *lf, char *line)
+/* write a line of metaData to output file
+ * internal function called by lineFileNext */
+{
+    struct metaOutput *meta = NULL;
 
+    if (lf->isMetaUnique)
+    {
+        /* suppress repetition of comments */
+        if (hashLookup(lf->metaLines, line))
+        {
+            return;
+        }
+        hashAdd(lf->metaLines, line, NULL);
+    }
+    for (meta = lf->metaOutput ; meta != NULL ; meta = meta->next)
+        if (line != NULL && meta->metaFile != NULL)
+            fprintf(meta->metaFile,"%s\n", line);
+}
+
+static char **getDecompressor(char *fileName)
+/* if a file is compressed, return the command to decompress the
+ * approriate format, otherwise return NULL */
+{
+    static char *GZ_READ[] = {"gzip", "-dc", NULL};
+    static char *Z_READ[] = {"gzip", "-dc", NULL};
+    static char *BZ2_READ[] = {"bzip2", "-dc", NULL};
+    static char *ZIP_READ[] = {"gzip", "-dc", NULL};
+
+    char **result = NULL;
+    char *fileNameDecoded = cloneString(fileName);
+    if (startsWith("http://" , fileName)
+        || startsWith("https://", fileName)
+        || startsWith("ftp://",   fileName))
+        cgiDecode(fileName, fileNameDecoded, strlen(fileName));
+
+    if      (endsWith(fileNameDecoded, ".gz"))
+        result = GZ_READ;
+    else if (endsWith(fileNameDecoded, ".Z"))
+        result = Z_READ;
+    else if (endsWith(fileNameDecoded, ".bz2"))
+        result = BZ2_READ;
+    else if (endsWith(fileNameDecoded, ".zip"))
+        result = ZIP_READ;
+
+    freeMem(fileNameDecoded);
+    return result;
+
+}
+
+
+static char * headerBytes(char *fileName, int numbytes)
+/* Return specified number of header bytes from file
+ * if file exists as a string which should be freed. */
+{
+    int fd,bytesread=0;
+    char *result = NULL;
+    if ((fd = open(fileName, O_RDONLY)) >= 0)
+    {
+        result=needMem(numbytes+1);
+        if ((bytesread=read(fd,result,numbytes)) < numbytes)
+            freez(&result);  /* file too short? can read numbytes */
+        else
+            result[numbytes]=0;
+        close(fd);
+    }
+    return result;
+}
+
+
+struct lineFile *lineFileDecompress(char *fileName, bool zTerm)
+/* open a linefile with decompression */
+{
+    struct pipeline *pl;
+    struct lineFile *lf;
+    char *testName = NULL;
+    char *testbytes = NULL;    /* the header signatures for .gz, .bz2, .Z,
+			    * .zip are all 2-4 bytes only */
+    if (fileName==NULL)
+        return NULL;
+    testbytes=headerBytes(fileName,4);
+    if (!testbytes)
+        return NULL;  /* avoid error from pipeline */
+    testName=getFileNameFromHdrSig(testbytes);
+    freez(&testbytes);
+    if (!testName)
+        return NULL;  /* avoid error from pipeline */
+    pl = pipelineOpen1(getDecompressor(fileName), pipelineRead|pipelineSigpipe, fileName, NULL);
+    lf = lineFileAttach(fileName, zTerm, pipelineFd(pl));
+    lf->pl = pl;
+    return lf;
+}
+
+int lineFileLongNetRead(int fd, char *buf, int size)
+/* Keep reading until either get no new characters or
+ * have read size */
+{
+    int oneSize, totalRead = 0;
+
+    while (size > 0)
+    {
+        oneSize = read(fd, buf, size);
+        if (oneSize <= 0)
+            break;
+        totalRead += oneSize;
+        buf += oneSize;
+        size -= oneSize;
+    }
+    return totalRead;
+}
+
+struct lineFile *lineFileMayOpen(char *fileName, bool zTerm)
+/* Try and open up a lineFile. */
+{
+    if (sameString(fileName, "stdin"))
+        return lineFileStdin(zTerm);
+    else if (getDecompressor(fileName) != NULL)
+        return lineFileDecompress(fileName, zTerm);
+    else
+    {
+        int fd = open(fileName, O_RDONLY);
+        if (fd == -1)
+            return NULL;
+        return lineFileAttach(fileName, zTerm, fd);
+    }
+}
+
+
+struct lineFile *lineFileOpen(char *fileName, bool zTerm)
+/* Open up a lineFile or die trying. */
+{
+    struct lineFile *lf = lineFileMayOpen(fileName, zTerm);
+    if (lf == NULL)
+        errAbort("Couldn't open %s , %s", fileName, strerror(errno));
+    return lf;
+}
+
+boolean lineFileNextReal(struct lineFile *lf, char **retStart)
+/* Fetch next line from file that is not blank and
+ *  * does not start with a '#'. */
+{
+    char *s, c;
+    while (lineFileNext(lf, retStart, NULL))
+    {
+        s = skipLeadingSpaces(*retStart);
+        c = s[0];
+        if (c != 0 && c != '#')
+            return TRUE;
+    }
+    return FALSE;
+}
+
+void lineFileReuse(struct lineFile *lf)
+/* Reuse current line. */
+{
+    lf->reuse = TRUE;
+}
+
+void lineFileRemoveInitialCustomTrackLines(struct lineFile *lf)
+/* remove initial browser and track lines */
+{
+    char *line;
+    while (lineFileNextReal(lf, &line))
+    {
+        if (!(startsWith("browser", line) || startsWith("track", line) ))
+        {
+            verbose(2, "found line not browser or track: %s\n", line);
+            lineFileReuse(lf);
+            break;
+        }
+        verbose(2, "skipping %s\n", line);
+    }
+}
+
+int lineFileNeedNum(struct lineFile *lf, char *words[], int wordIx)
+/* Make sure that words[wordIx] is an ascii integer, and return
+ * binary representation of it. Conversion stops at first non-digit char. */
+{
+    char *ascii = words[wordIx];
+    char c = ascii[0];
+    if (c != '-' && !isdigit(c))
+        errAbort("Expecting number field %d line %d of %s, got %s",
+                 wordIx+1, lf->lineIx, lf->fileName, ascii);
+    return atoi(ascii);
+}
+
+double lineFileNeedDouble(struct lineFile *lf, char *words[], int wordIx)
+/* Make sure that words[wordIx] is an ascii double value, and return
+ * binary representation of it. */
+{
+    char *valEnd;
+    char *val = words[wordIx];
+    double doubleValue;
+
+    doubleValue = strtod(val, &valEnd);
+    if ((*val == '\0') || (*valEnd != '\0'))
+        errAbort("Expecting double field %d line %d of %s, got %s",
+                 wordIx+1, lf->lineIx, lf->fileName, val);
+    return doubleValue;
+}
+
+struct lineFile *lineFileAttach(char *fileName, bool zTerm, int fd)
+/* Wrap a line file around an open'd file. */
+{
+    struct lineFile *lf;
+    AllocVar(lf);
+    lf->fileName = cloneString(fileName);
+    lf->fd = fd;
+    lf->bufSize = 64*1024;
+    lf->zTerm = zTerm;
+    lf->buf = needMem(lf->bufSize+1);
+    return lf;
+}
+
+struct lineFile *lineFileStdin(bool zTerm)
+/* Wrap a line file around stdin. */
+{
+    return lineFileAttach("stdin", zTerm, fileno(stdin));
+}
+
+boolean lineFileNext(struct lineFile *lf, char **retStart, int *retSize)
+/* Fetch next line from file. */
+{
+    char *buf = lf->buf;
+    int bytesInBuf = lf->bytesInBuf;
+    int endIx = lf->lineEnd;
+    boolean gotLf = FALSE;
+    int newStart;
+
+    if (lf->reuse)
+    {
+        lf->reuse = FALSE;
+        if (retSize != NULL)
+            *retSize = lf->lineEnd - lf->lineStart;
+        *retStart = buf + lf->lineStart;
+        if (lf->metaOutput && *retStart[0] == '#')
+            metaDataAdd(lf, *retStart);
+        return TRUE;
+    }
+
+    if (lf->nextCallBack)
+        return lf->nextCallBack(lf, retStart, retSize);
+
+    if (lf->udcFile)
+    {
+        lf->bufOffsetInFile = udcTell(lf->udcFile);
+        char *line = udcReadLine(lf->udcFile);
+        if (line==NULL)
+            return FALSE;
+        int lineSize = strlen(line);
+        lf->bytesInBuf = lineSize;
+        lf->lineIx = -1;
+        lf->lineStart = 0;
+        lf->lineEnd = lineSize;
+        *retStart = line;
+        freeMem(lf->buf);
+        lf->buf = line;
+        lf->bufSize = lineSize;
+        return TRUE;
+    }
+
+#ifdef USE_TABIX
+    if (lf->tabix != NULL && lf->tabixIter != NULL)
+    {
+    // Just use line-oriented ti_read:
+    int lineSize = 0;
+    const char *line = ti_read(lf->tabix, lf->tabixIter, &lineSize);
+    if (line == NULL)
+	return FALSE;
+    lf->bufOffsetInFile = -1;
+    lf->bytesInBuf = lineSize;
+    lf->lineIx = -1;
+    lf->lineStart = 0;
+    lf->lineEnd = lineSize;
+    if (lineSize > lf->bufSize)
+	// shouldn't be!  but just in case:
+	lineFileExpandBuf(lf, lineSize * 2);
+    safecpy(lf->buf, lf->bufSize, line);
+    *retStart = lf->buf;
+    if (retSize != NULL)
+	*retSize = lineSize;
+    return TRUE;
+    }
+#endif // USE_TABIX
+
+    determineNlType(lf, buf+endIx, bytesInBuf);
+
+/* Find next end of line in buffer. */
+    switch(lf->nlType)
+    {
+        case nlt_unix:
+        case nlt_dos:
+            for (endIx = lf->lineEnd; endIx < bytesInBuf; ++endIx)
+            {
+                if (buf[endIx] == '\n')
+                {
+                    gotLf = TRUE;
+                    endIx += 1;
+                    break;
+                }
+            }
+            break;
+        case nlt_mac:
+            for (endIx = lf->lineEnd; endIx < bytesInBuf; ++endIx)
+            {
+                if (buf[endIx] == '\r')
+                {
+                    gotLf = TRUE;
+                    endIx += 1;
+                    break;
+                }
+            }
+            break;
+        case nlt_undet:
+            break;
+    }
+
+/* If not in buffer read in a new buffer's worth. */
+    while (!gotLf)
+    {
+        int oldEnd = lf->lineEnd;
+        int sizeLeft = bytesInBuf - oldEnd;
+        int bufSize = lf->bufSize;
+        int readSize = bufSize - sizeLeft;
+
+        if (oldEnd > 0 && sizeLeft > 0)
+        {
+            memmove(buf, buf+oldEnd, sizeLeft);
+        }
+        lf->bufOffsetInFile += oldEnd;
+        if (lf->fd >= 0)
+            readSize = lineFileLongNetRead(lf->fd, buf+sizeLeft, readSize);
+#ifdef USE_TABIX
+            else if (lf->tabix != NULL && readSize > 0)
+	{
+	readSize = ti_bgzf_read(lf->tabix->fp, buf+sizeLeft, readSize);
+	if (readSize < 1)
+	    return FALSE;
+	}
+#endif // USE_TABIX
+        else
+            readSize = 0;
+
+        if ((readSize == 0) && (endIx > oldEnd))
+        {
+            endIx = sizeLeft;
+            buf[endIx] = 0;
+            lf->bytesInBuf = newStart = lf->lineStart = 0;
+            lf->lineEnd = endIx;
+            ++lf->lineIx;
+            if (retSize != NULL)
+                *retSize = endIx - newStart;
+            *retStart = buf + newStart;
+            if (*retStart[0] == '#')
+                metaDataAdd(lf, *retStart);
+            return TRUE;
+        }
+        else if (readSize <= 0)
+        {
+            lf->bytesInBuf = lf->lineStart = lf->lineEnd = 0;
+            return FALSE;
+        }
+        bytesInBuf = lf->bytesInBuf = readSize + sizeLeft;
+        lf->lineEnd = 0;
+
+        determineNlType(lf, buf+endIx, bytesInBuf);
+
+        /* Look for next end of line.  */
+        switch(lf->nlType)
+        {
+            case nlt_unix:
+            case nlt_dos:
+                for (endIx = sizeLeft; endIx <bytesInBuf; ++endIx)
+                {
+                    if (buf[endIx] == '\n')
+                    {
+                        endIx += 1;
+                        gotLf = TRUE;
+                        break;
+                    }
+                }
+                break;
+            case nlt_mac:
+                for (endIx = sizeLeft; endIx <bytesInBuf; ++endIx)
+                {
+                    if (buf[endIx] == '\r')
+                    {
+                        endIx += 1;
+                        gotLf = TRUE;
+                        break;
+                    }
+                }
+                break;
+            case nlt_undet:
+                break;
+        }
+        if (!gotLf && bytesInBuf == lf->bufSize)
+        {
+            if (bufSize >= 512*1024*1024)
+            {
+                errAbort("Line too long (more than %d chars) line %d of %s",
+                         lf->bufSize, lf->lineIx+1, lf->fileName);
+            }
+            else
+            {
+                lineFileExpandBuf(lf, bufSize*2);
+                buf = lf->buf;
+            }
+        }
+    }
+
+    if (lf->zTerm)
+    {
+        buf[endIx-1] = 0;
+        if ((lf->nlType == nlt_dos) && (buf[endIx-2]=='\r'))
+        {
+            buf[endIx-2] = 0;
+        }
+    }
+
+    lf->lineStart = newStart = lf->lineEnd;
+    lf->lineEnd = endIx;
+    ++lf->lineIx;
+    if (retSize != NULL)
+        *retSize = endIx - newStart;
+    *retStart = buf + newStart;
+    if (*retStart[0] == '#')
+        metaDataAdd(lf, *retStart);
+    return TRUE;
+}
+
+void lineFileExpandBuf(struct lineFile *lf, int newSize)
+/* Expand line file buffer. */
+{
+    assert(newSize > lf->bufSize);
+    lf->buf = needMoreMem(lf->buf, lf->bytesInBuf, newSize);
+    lf->bufSize = newSize;
+}
+
+//end of linefile.c
+
+//begin of pipeline.c
+enum procState
+/* process state, in order of transition */
+{
+    procStateNew,  // plProc object created
+    procStateRun,  // proccess running
+    procStateDone  // process finished (ok or failed)
+};
+
+struct plProc
+/* A single process in a pipeline */
+{
+    struct plProc *next;   /* order list of processes */
+    struct pipeline *pl;   /* pipeline we are associated with */
+    char **cmd;            /* null-terminated command for this process */
+    pid_t  pid;            /* pid for process, -1 if not running */
+    enum procState state;  /* state of process */
+    int status;            /* status from wait */
+};
+
+struct pipeline
+/* Object for a process pipeline and associated open file.  Pipeline process
+ * consist of a process group leader and then all of the child process.  The
+ * group leader does no work, just wait on processes to complete and report
+ * errors to the top level process.  This object is create in the calling
+ * process, and then passed down, but not shared, via forks.
+ */
+{
+    struct plProc *procs;      /* list of processes */
+    int numRunning;            /* number of processes running */
+    pid_t groupLeader;         /* process group id, or -1 if not set. This is pid of group leader */
+    char *procName;            /* name to use in error messages. */
+    int pipeFd;                /* fd of pipe to/from process, -1 if none */
+    unsigned options;          /* options */
+    FILE* pipeFh;              /* optional stdio around pipe */
+    char* stdioBuf;            /* optional stdio buffer */
+    struct lineFile *pipeLf;   /* optional lineFile around pipe */
+};
+
+/* file buffer size */
+#define FILE_BUF_SIZE 64*1024
+
+static int pipeCreate(int *writeFd)
+/* create a pipe or die, return readFd */
+{
+    int pipeFds[2];
+    if (pipe(pipeFds) < 0)
+        errnoAbort("can't create pipe");
+    *writeFd = pipeFds[1];
+    return pipeFds[0];
+}
+
+static void safeClose(int *fdPtr)
+/* Close with error checking.  *fdPtr == -1 indicated already closed */
+{
+    int fd = *fdPtr;
+    if (fd != -1)
+    {
+        if (close(fd) < 0)
+            errnoAbort("close failed on fd %d", fd);
+        *fdPtr = -1;
+    }
+}
+
+
+
+struct pipeline *pipelineOpen1(char **cmd, unsigned opts,
+                               char *otherEndFile, char *stderrFile)
+/* like pipelineOpen(), only takes a single command */
+{
+    char **cmds[2];
+    cmds[0] = cmd;
+    cmds[1] = NULL;
+    return pipelineOpen(cmds, opts, otherEndFile, stderrFile);
+}
+
+int pipelineFd(struct pipeline *pl)
+/* Get the file descriptor for a pipeline */
+{
+    return pl->pipeFd;
+}
+
+struct pipeline *pipelineOpen(char ***cmds, unsigned opts,
+                              char *otherEndFile, char *stderrFile)
+/* Create a pipeline from an array of commands.  See pipeline.h for
+ * full documentation */
+{
+    int otherEndFd;
+    int stderrFd = (stderrFile == NULL) ? STDERR_FILENO : openWrite(stderrFile, FALSE);
+
+    checkOpts(opts);
+    boolean append = ((opts & pipelineAppend) != 0);
+    if (opts & pipelineRead)
+        otherEndFd = (otherEndFile == NULL) ? STDIN_FILENO : openRead(otherEndFile);
+    else
+        otherEndFd = (otherEndFile == NULL) ? STDOUT_FILENO : openWrite(otherEndFile, append);
+    struct pipeline *pl = pipelineOpenFd(cmds, opts, otherEndFd, stderrFd);
+    safeClose(&otherEndFd);
+    if (stderrFile != NULL)
+        safeClose(&stderrFd);
+    return pl;
+}
+
+
+//end of pipeline.c
+
+
+
+
+
+
+
+//begin of bwgCreate.c
 
 struct bwgSection *bwgParseWig(
         char *fileName,       /* Name of ascii wig file. */
@@ -144,6 +712,11 @@ void bwgMakeChromInfo(struct bwgSection *sectionList, struct hash *chromSizeHash
     *retMaxChromNameSize = maxChromNameSize;
 }
 
+static int bwgStrcmp (const void * A, const void * B) {
+    char * stringA = *((char **) A);
+    char * stringB = *((char **) B);
+    return strcmp(stringA, stringB);
+}
 
 void bwgMakeAllChromInfo(struct bwgSection *sectionList, struct hash *chromSizeHash,
                          int *retChromCount, struct bbiChromInfo **retChromArray,
@@ -292,6 +865,23 @@ static void bwgComputeFixedSummaries(struct bwgSection * sectionList, struct bbi
     }
 
     *summaryCount = REDUCTION_COUNT;
+}
+static struct cirTreeRange bwgSectionFetchKey(const void *va, void *context)
+/* Fetch bwgSection key for r-tree */
+{
+    struct cirTreeRange res;
+    const struct bwgSection *a = *((struct bwgSection **)va);
+    res.chromIx = a->chromId;
+    res.start = a->start;
+    res.end = a->end;
+    return res;
+}
+
+static bits64 bwgSectionFetchOffset(const void *va, void *context)
+/* Fetch bwgSection file offset for r-tree */
+{
+    const struct bwgSection *a = *((struct bwgSection **)va);
+    return a->fileOffset;
 }
 
 void bwgCreate(struct bwgSection *sectionList, struct hash *chromSizeHash,
@@ -469,7 +1059,23 @@ void bwgCreate(struct bwgSection *sectionList, struct hash *chromSizeHash,
     carefulClose(&f);
 }
 
-//end of bwgCreat.c
+int bwgSectionCmp(const void *va, const void *vb)
+/* Compare to sort based on chrom,start,end.  */
+{
+    const struct bwgSection *a = *((struct bwgSection **)va);
+    const struct bwgSection *b = *((struct bwgSection **)vb);
+    int dif = strcmp(a->chrom, b->chrom);
+    if (dif == 0)
+    {
+        dif = (int)a->start - (int)b->start;
+        if (dif == 0)
+            dif = (int)a->end - (int)b->end;
+    }
+    return dif;
+}
+
+
+//end of bwgCreate.c
 
 //begin of bwgQuery.c
 struct bbiFile *bigWigFileOpen(char *fileName)
@@ -551,6 +1157,22 @@ struct bbiFile *bbiFileOpen(char *fileName, bits32 sig, char *typeName)
     bbi->chromBpt =  bptFileAttach(fileName, udc);
 
     return bbi;
+}
+
+void bbiFileClose(struct bbiFile **pBwf)
+/* Close down a big wig/big bed file. */
+{
+    struct bbiFile *bwf = *pBwf;
+    if (bwf != NULL)
+    {
+        cirTreeFileDetach(&bwf->unzoomedCir);
+        slFreeList(&bwf->levelList);
+        slFreeList(&bwf->levelList);
+        bptFileDetach(&bwf->chromBpt);
+        udcFileClose(&bwf->udc);
+        freeMem(bwf->fileName);
+        freez(pBwf);
+    }
 }
 
 
@@ -908,6 +1530,74 @@ void udcMustRead(struct udcFile *file, void *buf, bits64 size)
     if (sizeRead < size)
         errAbort("udc couldn't read %"PRIu64" bytes from %s, did read %"PRIu64"", size, file->url, sizeRead);
 }
+bits64 udcTell(struct udcFile *file)
+/* Return current file position. */
+{
+    return file->offset;
+}
+char *udcReadLine(struct udcFile *file)
+/* Fetch next line from udc cache or NULL. */
+{
+    char shortBuf[2], *longBuf = NULL, *buf = shortBuf;
+    int i, bufSize = sizeof(shortBuf);
+    for (i=0; ; ++i)
+    {
+        /* See if need to expand buffer, which is initially on stack, but if it gets big goes into
+         * heap. */
+        if (i >= bufSize)
+        {
+            int newBufSize = bufSize*2;
+            char *newBuf = needLargeMem(newBufSize);
+            memcpy(newBuf, buf, bufSize);
+            freeMem(longBuf);
+            buf = longBuf = newBuf;
+            bufSize = newBufSize;
+        }
+
+        char c;
+        bits64 sizeRead = udcRead(file, &c, 1);
+        if (sizeRead == 0)
+            return NULL;
+        buf[i] = c;
+        if (c == '\n')
+        {
+            buf[i] = 0;
+            break;
+        }
+    }
+    char *retString = cloneString(buf);
+    freeMem(longBuf);
+    return retString;
+}
+float udcReadFloat(struct udcFile *file, boolean isSwapped)
+/* Read and optionally byte-swap floating point number. */
+{
+    float val;
+    udcMustRead(file, &val, sizeof(val));
+    if (isSwapped)
+        val = byteSwapFloat(val);
+    return val;
+}
+
+bits32 udcReadBits32(struct udcFile *file, boolean isSwapped)
+/* Read and optionally byte-swap 32 bit entity. */
+{
+    bits32 val;
+    udcMustRead(file, &val, sizeof(val));
+    if (isSwapped)
+        val = byteSwap32(val);
+    return val;
+}
+
+bits64 udcReadBits64(struct udcFile *file, boolean isSwapped)
+/* Read and optionally byte-swap 64 bit entity. */
+{
+    bits64 val;
+    udcMustRead(file, &val, sizeof(val));
+    if (isSwapped)
+        val = byteSwap64(val);
+    return val;
+}
 //end of udc.c
 
 //begin of bits.c
@@ -1139,6 +1829,24 @@ lmCleanup(&lm);
 
 
 //begin of memalloc.c
+#define NEEDMEM_LIMIT 500000000
+
+void *needMem(size_t size)
+/* Need mem calls abort if the memory allocation fails. The memory
+ * is initialized to zero. */
+{
+    void *pt;
+    if (size == 0 || size > NEEDMEM_LIMIT)
+        errAbort("needMem: trying to allocate %"PRIuMAX" bytes (limit: %"PRIuMAX")",
+            (uintmax_t)size, (uintmax_t)NEEDMEM_LIMIT);
+    if ((pt = mhStack->alloc(size)) == NULL)
+        errAbort("needMem: Out of memory - request size %"PRIuMAX" bytes, errno: %d\n",
+            (uintmax_t)size, errno);
+    memset(pt, 0, size);
+    return pt;
+}
+
+
 void *needLargeMem(size_t size)
 /* This calls abort if the memory allocation fails. The memory is
  * not initialized to zero. */
@@ -1159,9 +1867,65 @@ void freeMem(void *pt)
     if (pt != NULL)
         mhStack->free(pt);
 }
+
+
 //end of memalloc.c
 
 //begin of common.c
+boolean startsWith(const char *start, const char *string)
+/* Returns TRUE if string begins with start. */
+{
+    char c;
+    int i;
+
+    for (i=0; ;i += 1)
+    {
+        if ((c = start[i]) == 0)
+            return TRUE;
+        if (string[i] != c)
+            return FALSE;
+    }
+}
+
+boolean endsWith(char *string, char *end)
+/* Returns TRUE if string ends with end. */
+{
+    int sLen, eLen, offset;
+    sLen = strlen(string);
+    eLen = strlen(end);
+    offset = sLen - eLen;
+    if (offset < 0)
+        return FALSE;
+    return sameString(string+offset, end);
+}
+
+
+int vasafef(char* buffer, int bufSize, char *format, va_list args)
+/* Format string to buffer, vsprintf style, only with buffer overflow
+ * checking.  The resulting string is always terminated with zero byte. */
+{
+    int sz = vsnprintf(buffer, bufSize, format, args);
+/* note that some version return -1 if too small */
+    if ((sz < 0) || (sz >= bufSize))
+    {
+        buffer[bufSize-1] = (char) 0;
+        errAbort("buffer overflow, size %d, format: %s, buffer: '%s'", bufSize, format, buffer);
+    }
+    return sz;
+}
+
+int safef(char* buffer, int bufSize, char *format, ...)
+/* Format string to buffer, vsprintf style, only with buffer overflow
+ * checking.  The resulting string is always terminated with zero byte. */
+{
+    int sz;
+    va_list args;
+    va_start(args, format);
+    sz = vasafef(buffer, bufSize, format, args);
+    va_end(args);
+    return sz;
+}
+
 int slCount(const void *list)
 {
     struct slList *pt = (struct slList *)list;
@@ -1289,6 +2053,20 @@ void mustWrite(FILE *file, void *buf, size_t size)
         errAbort("Error writing %"PRIdMAX" bytes: %s\n", (intmax_t)size, strerror(ferror(file)));
     }
 }
+char *skipLeadingSpaces(char *s)
+/* Return first non-white space. */
+{
+    char c;
+    if (s == NULL) return NULL;
+    for (;;)
+    {
+        c = *s;
+        if (!isspace(c))
+            return s;
+        ++s;
+    }
+}
+
 //end of common.c
 
 //begin of bwgQuery.c
@@ -1380,3 +2158,336 @@ void cirTreeFileDetach(struct cirTreeFile **pCrt)
     freez(pCrt);
 }
 //end of cirTree.c
+
+//begin of cheapcgi.c
+void cgiDecode(char *in, char *out, int inLength)
+/* Decode from cgi pluses-for-spaces format to normal.
+ * Out will be a little shorter than in typically, and
+ * can be the same buffer. */
+{
+    char c;
+    int i;
+    for (i=0; i<inLength;++i)
+    {
+        c = *in++;
+        if (c == '+')
+            *out++ = ' ';
+        else if (c == '%')
+        {
+            int code;
+            if (sscanf(in, "%2x", &code) != 1)
+                code = '?';
+            in += 2;
+            i += 2;
+            *out++ = code;
+        }
+        else
+            *out++ = c;
+    }
+    *out++ = 0;
+}
+//end of cheapcgi.c
+
+//begin of verbose.c
+static int logVerbosity = 1;	/* The level of log verbosity.  0 is silent. */
+static FILE *logFile;	/* File to log to. */
+
+static boolean checkedDotsEnabled = FALSE;  /* have we check for dot output
+                                             * being enabled? */
+static boolean dotsEnabled = FALSE;         /* is dot output enabled? */
+
+void verboseVa(int verbosity, char *format, va_list args)
+/* Log with at given verbosity vprintf formatted args. */
+{
+    if (verbosity <= logVerbosity)
+    {
+        if (logFile == NULL)
+            logFile = stderr;
+        vfprintf(logFile, format, args);
+        fflush(logFile);
+    }
+}
+
+void verbose(int verbosity, char *format, ...)
+/* Write printf formatted message to log (which by
+ * default is stderr) if global verbose variable
+ * is set to verbosity or higher. */
+{
+    va_list args;
+    va_start(args, format);
+    verboseVa(verbosity, format, args);
+    va_end(args);
+}
+//end of verbose.c
+
+
+//begin of hash.c
+bits32 hashString(char *string)
+/* Compute a hash value of a string. */
+{
+    char *keyStr = string;
+    unsigned int result = 0;
+    int c;
+
+    while ((c = *keyStr++) != '\0')
+    {
+        result += (result<<3) + c;
+    }
+    return result;
+}
+
+bits32 hashCrc(char *string)
+/* Returns a CRC value on string. */
+{
+    unsigned char *us = (unsigned char *)string;
+    unsigned char c;
+    bits32 shiftAcc = 0;
+    bits32 addAcc = 0;
+
+    while ((c = *us++) != 0)
+    {
+        shiftAcc <<= 2;
+        shiftAcc += c;
+        addAcc += c;
+    }
+    return shiftAcc + addAcc;
+}
+
+struct hashEl *hashLookup(struct hash *hash, char *name)
+/* Looks for name in hash table. Returns associated element,
+ * if found, or NULL if not.  If there are multiple entries
+ * for name, the last one added is returned (LIFO behavior).
+ */
+{
+    struct hashEl *el = hash->table[hashString(name)&hash->mask];
+    while (el != NULL)
+    {
+        if (strcmp(el->name, name) == 0)
+            break;
+        el = el->next;
+    }
+    return el;
+}
+
+struct hashEl *hashLookupUpperCase(struct hash *hash, char *name)
+/* Lookup upper cased name in hash. (Assumes all elements of hash
+ * are themselves already in upper case.) */
+{
+    char s[256];
+    safef(s, sizeof(s), "%s", name);
+    touppers(s);
+    return hashLookup(hash, s);
+}
+
+
+struct hashEl *hashLookupNext(struct hashEl *hashEl)
+/* Find the next occurance of name that may occur in the table multiple times,
+ * or NULL if not found.  Use hashLookup to find the first occurrence.  Elements
+ * are returned in LIFO order.
+ */
+{
+    struct hashEl *el = hashEl->next;
+    while (el != NULL)
+    {
+        if (strcmp(el->name, hashEl->name) == 0)
+            break;
+        el = el->next;
+    }
+    return el;
+}
+
+struct hashEl *hashAddN(struct hash *hash, char *name, int nameSize, void *val)
+/* Add name of given size to hash (no need to be zero terminated) */
+{
+    struct hashEl *el;
+    if (hash->lm)
+        el = lmAlloc(hash->lm, sizeof(*el));
+    else
+        AllocVar(el);
+    el->hashVal = hashString(name);
+    int hashVal = el->hashVal & hash->mask;
+    if (hash->lm)
+    {
+        el->name = lmAlloc(hash->lm, nameSize+1);
+        memcpy(el->name, name, nameSize);
+    }
+    else
+        el->name = cloneStringZ(name, nameSize);
+    el->val = val;
+    el->next = hash->table[hashVal];
+    hash->table[hashVal] = el;
+    hash->elCount += 1;
+    if (hash->autoExpand && hash->elCount > (int)(hash->size * hash->expansionFactor))
+    {
+        /* double the size */
+        hashResize(hash, digitsBaseTwo(hash->size));
+    }
+    return el;
+}
+
+struct hashEl *hashAdd(struct hash *hash, char *name, void *val)
+/* Add new element to hash table.  If an item with name, already exists, a new
+ * item is added in a LIFO manner.  The last item added for a given name is
+ * the one returned by the hashLookup functions.  hashLookupNext must be used
+ * to find the preceding entries for a name.
+ */
+{
+    return hashAddN(hash, name, strlen(name), val);
+}
+
+boolean hashMayRemove(struct hash *hash, char *name)
+/* Remove item of the given name from hash table, if present.
+ * Return true if it was present */
+{
+    return (hashRemove(hash, name) != NULL);
+}
+
+void hashMustRemove(struct hash *hash, char *name)
+/* Remove item of the given name from hash table, or error
+ * if not present */
+{
+    if (hashRemove(hash, name) == NULL)
+        errAbort("attempt to remove non-existant %s from hash", name);
+}
+
+void freeHashEl(struct hashEl *hel)
+/* Free hash element. Use only on non-local memory version. */
+{
+    freeMem(hel->name);
+    freeMem(hel);
+}
+
+void *hashRemove(struct hash *hash, char *name)
+/* Remove item of the given name from hash table.
+ * Returns value of removed item, or NULL if not in the table.
+ * If their are multiple entries for name, the last one added
+ * is removed (LIFO behavior).
+ */
+{
+    struct hashEl *hel;
+    void *ret;
+    struct hashEl **pBucket = &hash->table[hashString(name)&hash->mask];
+    for (hel = *pBucket; hel != NULL; hel = hel->next)
+        if (sameString(hel->name, name))
+            break;
+    if (hel == NULL)
+        return NULL;
+    ret = hel->val;
+    if (slRemoveEl(pBucket, hel))
+    {
+        hash->elCount -= 1;
+        if (!hash->lm)
+            freeHashEl(hel);
+    }
+    return ret;
+}
+
+struct hashEl *hashAddUnique(struct hash *hash, char *name, void *val)
+/* Add new element to hash table. Squawk and die if not unique */
+{
+    if (hashLookup(hash, name) != NULL)
+        errAbort("%s duplicated, aborting", name);
+    return hashAdd(hash, name, val);
+}
+
+struct hashEl *hashAddSaveName(struct hash *hash, char *name, void *val, char **saveName)
+/* Add new element to hash table.  Save the name of the element, which is now
+ * allocated in the hash table, to *saveName.  A typical usage would be:
+ *    AllocVar(el);
+ *    hashAddSaveName(hash, name, el, &el->name);
+ */
+{
+    struct hashEl *hel = hashAdd(hash, name, val);
+    *saveName = hel->name;
+    return hel;
+}
+
+struct hashEl *hashStore(struct hash *hash, char *name)
+/* If element in hash already return it, otherwise add it
+ * and return it. */
+{
+    struct hashEl *hel;
+    if ((hel = hashLookup(hash, name)) != NULL)
+        return hel;
+    return hashAdd(hash, name, NULL);
+}
+
+char  *hashStoreName(struct hash *hash, char *name)
+/* If element in hash already return it, otherwise add it
+ * and return it. */
+{
+    struct hashEl *hel;
+    if (name == NULL)
+        return NULL;
+    if ((hel = hashLookup(hash, name)) != NULL)
+        return hel->name;
+    return hashAdd(hash, name, NULL)->name;
+}
+
+int hashIntVal(struct hash *hash, char *name)
+/* Return integer value associated with name in a simple
+ * hash of ints. */
+{
+    void *val = hashMustFindVal(hash, name);
+    return ptToInt(val);
+}
+
+struct hashCookie hashFirst(struct hash *hash)
+/* Return an object to use by hashNext() to traverse the hash table.
+ * The first call to hashNext will return the first entry in the table. */
+{
+    struct hashCookie cookie;
+    cookie.hash = hash;
+    cookie.idx = 0;
+    cookie.nextEl = NULL;
+
+/* find first entry */
+    for (cookie.idx = 0;
+         (cookie.idx < hash->size) && (hash->table[cookie.idx] == NULL);
+         cookie.idx++)
+        continue;  /* empty body */
+    if (cookie.idx < hash->size)
+        cookie.nextEl = hash->table[cookie.idx];
+    return cookie;
+}
+
+struct hashEl* hashNext(struct hashCookie *cookie)
+/* Return the next entry in the hash table, or NULL if no more. Do not modify
+ * hash table while this is being used. */
+{
+/* NOTE: if hashRemove were coded to track the previous entry during the
+ * search and then use it to do the remove, it would be possible to
+ * remove the entry returned by this method */
+    struct hashEl *retEl = cookie->nextEl;
+    if (retEl == NULL)
+        return NULL;  /* no more */
+
+/* find next entry */
+    cookie->nextEl = retEl->next;
+    if (cookie->nextEl == NULL)
+    {
+        for (cookie->idx++; (cookie->idx < cookie->hash->size)
+                            && (cookie->hash->table[cookie->idx] == NULL); cookie->idx++)
+            continue;  /* empty body */
+        if (cookie->idx < cookie->hash->size)
+            cookie->nextEl = cookie->hash->table[cookie->idx];
+    }
+    return retEl;
+}
+
+//end of hash.c
+
+//begin of bbiWrite.c
+void bbiChromInfoKey(const void *va, char *keyBuf)
+/* Get key field out of bbiChromInfo. */
+{
+    const struct bbiChromInfo *a = ((struct bbiChromInfo *)va);
+    strcpy(keyBuf, a->name);
+}
+void *bbiChromInfoVal(const void *va)
+/* Get val field out of bbiChromInfo. */
+{
+    const struct bbiChromInfo *a = ((struct bbiChromInfo *)va);
+    return (void*)(&a->id);
+}
+//end of bbiWrite.c

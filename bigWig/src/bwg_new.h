@@ -201,13 +201,6 @@ struct cirTreeFile
 };
 
 void cirTreeFileDetach(struct cirTreeFile **pCrt);
-struct cirTreeRange
-/* A chromosome id and an interval inside it. */
-{
-    bits32 chromIx;	/* Chromosome id. */
-    bits32 start;	/* Start position in chromosome. */
-    bits32 end;		/* One past last base in interval in chromosome. */
-};
 //end of cirTree.h
 
 
