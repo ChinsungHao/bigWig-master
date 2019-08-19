@@ -5,6 +5,8 @@
 
 
 #include "bwg_new.h"
+#include "bw_query.h"
+
 
 
 /* Interface to abstract handling of fragmented bigWig objects

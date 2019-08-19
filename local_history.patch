@@ -1,0 +1,82 @@
+Index: bigWig/src/bwg_new.h
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
+<+>UTF-8
+===================================================================
+--- bigWig/src/bwg_new.h	(date 1566198016229)
++++ bigWig/src/bwg_new.h	(date 1566198016229)
+@@ -201,6 +201,13 @@
+ };
+ 
+ void cirTreeFileDetach(struct cirTreeFile **pCrt);
++struct cirTreeRange
++/* A chromosome id and an interval inside it. */
++{
++    bits32 chromIx;	/* Chromosome id. */
++    bits32 start;	/* Start position in chromosome. */
++    bits32 end;		/* One past last base in interval in chromosome. */
++};
+ //end of cirTree.h
+ 
+ 
+@@ -300,6 +307,12 @@
+ void bbiChromInfoFreeList(struct bbiChromInfo **pList);
+ /* Free a list of bbiChromInfo's */
+ 
++void bbiChromInfoKey(const void *va, char *keyBuf);
++/* Get key field out of bbiChromInfo. */
++
++void *bbiChromInfoVal(const void *va);
++/* Get val field out of bbiChromInfo. */
++
+ enum bbiSummaryType
+ /* Way to summarize data. */
+ {
+@@ -424,36 +437,6 @@
+ void bigwig_free(bigWig_t * bw);
+ //end of bigwiglib.h
+ 
+-
+-
+-
+-
+-//begining of bw_query.h
+-typedef struct {
+-    double defaultValue;
+-    int do_abs;
+-
+-    double total;
+-    double count;
+-    double thresh;
+-} bwStepOpData;
+-
+-typedef void (* bw_op_clear)(bwStepOpData * data);
+-typedef void (* bw_op_add)(bwStepOpData * data, double isize, double ivalue);
+-typedef double (* bw_op_result)(bwStepOpData * data, int step);
+-
+-typedef struct {
+-    bw_op_clear clear;
+-    bw_op_add add;
+-    bw_op_result result;
+-} bwStepOp;
+-
+-void bw_select_op(bwStepOp * op, const char * bw_op_type, int probe_mode);
+-int bw_step_query_size(int start, int end, int step);
+-int bw_step_query(bigWig_t * bigwig, bwStepOp * op, const char * chrom, int start, int end, int step, double gap_value, int do_abs, double thresh, double * buffer);
+-int bw_chrom_step_query(bigWig_t * bigwig, bwStepOp * op, const char * chrom, int step, double gap_value, int do_abs, double * buffer);
+-//end of bw_query.h
+-
+ //begin of localmem.h
+ struct lm *lmInit(int blockSize);
+ /* Create a local memory pool. Parameters are:
+@@ -747,6 +730,10 @@
+     UBYTE reserved;	/* Always zero for now. */
+     bits16 itemCount;	/* Number of items in block. */
+ };
++
++int bwgSectionCmp(const void *va, const void *vb);
++/* Compare to sort based on chrom,start,end.  */
++
+ void bwgSectionHeadFromMem(char **pPt, struct bwgSectionHead *head, boolean isSwapped);
+ /* Read section header. */
+ 

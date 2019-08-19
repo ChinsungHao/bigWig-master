@@ -3,24 +3,24 @@
 
 #include "bwg_new.h"
 
-//typedef struct {
-//  double defaultValue;
-//  int do_abs;
-//
-//  double total;
-//  double count;
-//  double thresh;
-//} bwStepOpData;
+typedef struct {
+  double defaultValue;
+  int do_abs;
+
+  double total;
+  double count;
+  double thresh;
+} bwStepOpData;
 
 typedef void (* bw_op_clear)(bwStepOpData * data);
 typedef void (* bw_op_add)(bwStepOpData * data, double isize, double ivalue);
 typedef double (* bw_op_result)(bwStepOpData * data, int step);
 
-//typedef struct {
-//  bw_op_clear clear;
-//  bw_op_add add;
-//  bw_op_result result;
-//} bwStepOp;
+typedef struct {
+  bw_op_clear clear;
+  bw_op_add add;
+  bw_op_result result;
+} bwStepOp;
 
 void bw_select_op(bwStepOp * op, const char * bw_op_type, int probe_mode);
 int bw_step_query_size(int start, int end, int step);

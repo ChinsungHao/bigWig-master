@@ -17,6 +17,9 @@
 #include <stdint.h>
 #include <setjmp.h>
 #include <assert.h>
+#include <fcntl.h>
+#include <errno.h>
+#include <unistd.h>
 
 
 #define TRUE 1
@@ -32,6 +35,27 @@
 #define uint unsigned int
 #endif
 
+#define logBase2(x)(log(x)/log(2))
+/* return log base two of number */
+
+#define round(a) ((int)((a)+0.5))
+/* Round floating point val to nearest integer. */
+
+#define roundll(a) ((long long)((a)+0.5))
+/* Round floating point val to nearest long long. */
+
+#ifndef min
+#define min(a,b) ( (a) < (b) ? (a) : (b) )
+/* Return min of a and b. */
+#endif
+
+#ifndef max
+#define max(a,b) ( (a) > (b) ? (a) : (b) )
+/* Return max of a and b. */
+#endif
+
+#define sameString(a,b) (strcmp(a,b)==0)
+/* Returns TRUE if two strings same. */
 
 #define UBYTE uint8_t   /* Wants to be unsigned 8 bits. */
 #define BYTE int8_t      /* Wants to be signed 8 bits. */
@@ -44,6 +68,117 @@
 #define signed32 int32_t	      /* Wants to be signed 32 bits. */
 #define bits8 uint8_t   /* Wants to be unsigned 8 bits. */
 //#define SIGJMP_BUF jmp_buf
+
+//begin of linefile.h
+enum nlType {
+    nlt_undet, /* undetermined */
+    nlt_unix,  /* lf   */
+    nlt_dos,   /* crlf */
+    nlt_mac    /* cr   */
+};
+
+struct metaOutput
+/* struct to store list of file handles to output meta data to
+ * meta data is text after # */
+{
+    struct metaOutput *next;    /* next file handle */
+    FILE *metaFile;             /* file to write metadata to */
+};
+
+struct lineFile
+/* Structure to handle fast, line oriented
+ * fileIo. */
+{
+    struct lineFile *next;	/* Might need to be on a list. */
+    char *fileName;		/* Name of file. */
+    int fd;			/* File handle.  -1 for 'memory' files. */
+    int bufSize;		/* Size of buffer. */
+    off_t bufOffsetInFile;	/* Offset in file of first buffer byte. */
+    int bytesInBuf;		/* Bytes read into buffer. */
+    int reserved;		/* Reserved (zero for now). */
+    int lineIx;			/* Current line. */
+    int lineStart;		/* Offset of line in buffer. */
+    int lineEnd;		/* End of line in buffer. */
+    bool zTerm;			/* Replace '\n' with zero? */
+    enum nlType nlType;         /* type of line endings: dos, unix, mac or undet */
+    bool reuse;			/* Set if reusing input. */
+    char *buf;			/* Buffer. */
+    struct pipeline *pl;        /* pipeline if reading compressed */
+    struct metaOutput *metaOutput;   /* list of FILE handles to write metaData to */
+    bool isMetaUnique;          /* if set, do not repeat comments in output */
+    struct hash *metaLines;     /* save lines to suppress repetition */
+#ifdef USE_TABIX
+    tabix_t *tabix;		/* A tabix-compressed file and its binary index file (.tbi) */
+    ti_iter_t tabixIter;	/* An iterator to get decompressed indexed lines of text */
+#endif
+    struct udcFile *udcFile;    /* udc file if using caching */
+    struct dyString *fullLine;  // Filled with full line when a lineFileNextFull is called
+    struct dyString *rawLines;  // Filled with raw lines used to create the full line
+    boolean fullLineReuse;      // If TRUE, next call to lineFileNextFull will get
+    // already built fullLine
+    void *dataForCallBack;                                 // ptr to data needed for callbacks
+    void(*checkSupport)(struct lineFile *lf, char *where); // check if operation supported
+    boolean(*nextCallBack)(struct lineFile *lf, char **retStart, int *retSize); // next line callback
+    void(*closeCallBack)(struct lineFile *lf);             // close callback
+};
+
+char *getFileNameFromHdrSig(char *m);
+
+void lineFileRemoveInitialCustomTrackLines(struct lineFile *lf);
+
+struct lineFile *lineFileMayOpen(char *fileName, bool zTerm);
+/* Try and open up a lineFile. If fileName ends in .gz, .Z, or .bz2,
+ * it will be read from a decompress pipeline. */
+
+boolean lineFileNextReal(struct lineFile *lf, char **retStart);
+
+int lineFileNeedNum(struct lineFile *lf, char *words[], int wordIx);
+
+double lineFileNeedDouble(struct lineFile *lf, char *words[], int wordIx);
+
+struct lineFile *lineFileAttach(char *fileName, bool zTerm, int fd);
+
+struct lineFile *lineFileStdin(bool zTerm);
+
+boolean lineFileNext(struct lineFile *lf, char **retStart, int *retSize);
+
+void lineFileExpandBuf(struct lineFile *lf, int newSize);
+/* Expand line file buffer. */
+//end of linefile.h
+
+
+
+
+//begin of pipeline.h
+struct linefile;
+struct pipeline;
+
+enum pipelineOpts
+/* pipeline options bitset */
+{
+    pipelineRead       = 0x01, /* read from pipeline */
+    pipelineWrite      = 0x02, /* write to pipeline */
+    pipelineNoAbort    = 0x04, /* don't abort if a process exits non-zero,
+                                * wait will return exit code instead.
+                                * Still aborts if process signals. */
+    pipelineMemInput   = 0x08, /* pipeline takes input from memory (internal) */
+    pipelineAppend     = 0x10, /* Append to output file (used only with pipelineWrite) */
+    pipelineSigpipe    = 0x20  /* enable sigpipe in the children and don't treat
+                                  as an error in the parent */
+};
+
+struct pipeline *pipelineOpen(char ***cmds, unsigned opts,
+                              char *otherEndFile, char *stderrFile);
+
+struct pipeline *pipelineOpen1(char **cmd, unsigned opts,
+                               char *otherEndFile, char *stderrFile);
+/* like pipelineOpen(), only takes a single command */
+
+int pipelineFd(struct pipeline *pl);
+/* Get the file descriptor for a pipeline */
+
+
+//end of pipeline.h
 
 
 //begin of cirTree.h
@@ -66,6 +201,13 @@ struct cirTreeFile
 };
 
 void cirTreeFileDetach(struct cirTreeFile **pCrt);
+struct cirTreeRange
+/* A chromosome id and an interval inside it. */
+{
+    bits32 chromIx;	/* Chromosome id. */
+    bits32 start;	/* Start position in chromosome. */
+    bits32 end;		/* One past last base in interval in chromosome. */
+};
 //end of cirTree.h
 
 
@@ -164,6 +306,12 @@ struct bbiChromInfo *bbiChromList(struct bbiFile *bbi);
 
 void bbiChromInfoFreeList(struct bbiChromInfo **pList);
 /* Free a list of bbiChromInfo's */
+
+void bbiChromInfoKey(const void *va, char *keyBuf);
+/* Get key field out of bbiChromInfo. */
+
+void *bbiChromInfoVal(const void *va);
+/* Get val field out of bbiChromInfo. */
 
 enum bbiSummaryType
 /* Way to summarize data. */
@@ -289,36 +437,6 @@ bigWig_t * bigwig_load(const char * filename, const char * udc_dir);
 void bigwig_free(bigWig_t * bw);
 //end of bigwiglib.h
 
-
-
-
-
-//begining of bw_query.h
-typedef struct {
-    double defaultValue;
-    int do_abs;
-
-    double total;
-    double count;
-    double thresh;
-} bwStepOpData;
-
-typedef void (* bw_op_clear)(bwStepOpData * data);
-typedef void (* bw_op_add)(bwStepOpData * data, double isize, double ivalue);
-typedef double (* bw_op_result)(bwStepOpData * data, int step);
-
-typedef struct {
-    bw_op_clear clear;
-    bw_op_add add;
-    bw_op_result result;
-} bwStepOp;
-
-void bw_select_op(bwStepOp * op, const char * bw_op_type, int probe_mode);
-int bw_step_query_size(int start, int end, int step);
-int bw_step_query(bigWig_t * bigwig, bwStepOp * op, const char * chrom, int start, int end, int step, double gap_value, int do_abs, double thresh, double * buffer);
-int bw_chrom_step_query(bigWig_t * bigwig, bwStepOp * op, const char * chrom, int step, double gap_value, int do_abs, double * buffer);
-//end of bw_query.h
-
 //begin of localmem.h
 struct lm *lmInit(int blockSize);
 /* Create a local memory pool. Parameters are:
@@ -351,6 +469,20 @@ void udcSeek(struct udcFile *file, bits64 offset);
 
 void udcMustRead(struct udcFile *file, void *buf, bits64 size);
 /* Read a block from file.  Abort if any problem, including EOF before size is read. */
+
+bits64 udcTell(struct udcFile *file);
+/* Return current file position. */
+
+char *udcReadLine(struct udcFile *file);
+/* Fetch next line from udc cache. */
+
+float udcReadFloat(struct udcFile *file, boolean isSwapped);
+/* Read and optionally byte-swap floating point number. */
+
+bits32 udcReadBits32(struct udcFile *file, boolean isSwapped);
+/* Read and optionally byte-swap 32 bit entity. */
+bits64 udcReadBits64(struct udcFile *file, boolean isSwapped);
+/* Read and optionally byte-swap 64 bit entity. */
 //end of udc.h
 
 
@@ -406,10 +538,55 @@ boolean bigWigValsOnChromFetchData(struct bigWigValsOnChrom *chromVals, char *ch
 #ifndef INLINE
 #define INLINE static inline
 #endif
-
+void *needMem(size_t size);
 void *needLargeMem(size_t size);
-/* This calls abort if the memory allocation fails. The memory is
- * not initialized to zero. */
+void *cloneMem(void *pt, size_t size)
+/* Allocate a new buffer of given size, and copy pt to it. */
+{
+    void *newPt = needLargeMem(size);
+    memcpy(newPt, pt, size);
+    return newPt;
+}
+
+static char *cloneStringZExt(const char *s, int size, int copySize)
+/* Make a zero terminated copy of string in memory */
+{
+    char *d = needMem(copySize+1);
+    copySize = min(size,copySize);
+    memcpy(d, s, copySize);
+    d[copySize] = 0;
+    return d;
+}
+
+char *cloneStringZ(const char *s, int size)
+/* Make a zero terminated copy of string in memory */
+{
+    return cloneStringZExt(s, strlen(s), size);
+}
+
+char *cloneString(const char *s)
+/* Make copy of string in dynamic memory */
+{
+    int size = 0;
+    if (s == NULL)
+        return NULL;
+    size = strlen(s);
+    return cloneStringZExt(s, size, size);
+}
+
+struct slRef
+/* Singly linked list of generic references. */
+{
+    struct slRef *next;	/* Next in list. */
+    void *val;		/* A reference to something. */
+};
+
+
+void freez(void *ppt);
+
+//void *needLargeMem(size_t size);
+///* This calls abort if the memory allocation fails. The memory is
+// * not initialized to zero. */
 
 void freeMem(void *pt);
 /* Free memory will check for null before freeing. */
@@ -479,7 +656,29 @@ void mustWrite(FILE *file, void *buf, size_t size);
 
 #define writeOne(file, var) mustWrite((file), &(var), sizeof(var))
 /* Write out one variable to file. */
+#define slNameFree freez
+/* Free a single slName */
 
+boolean startsWith(const char *start, const char *string);
+boolean endsWith(char *string, char *end);
+/* Returns TRUE if string ends with end. */
+
+char *cloneString(const char *s);
+/* Make copy of string in dynamic memory */
+
+int vasafef(char* buffer, int bufSize, char *format, va_list args);
+/* Format string to buffer, vsprintf style, only with buffer overflow
+ * checking.  The resulting string is always terminated with zero byte. */
+
+int safef(char* buffer, int bufSize, char *format, ...)
+/* Format string to buffer, vsprintf style, only with buffer overflow
+ * checking.  The resulting string is always terminated with zero byte. */
+#ifdef __GNUC__
+__attribute__((format(printf, 3, 4)))
+#endif
+;
+
+char *skipLeadingSpaces(char *s);
 //end of common.h
 
 //begin of bwgInternal.h
@@ -490,6 +689,7 @@ enum bwgSectionType
     bwgTypeVariableStep=2,
     bwgTypeFixedStep=3,
 };
+
 
 
 struct bwgSection
@@ -530,6 +730,10 @@ struct bwgSectionHead
     UBYTE reserved;	/* Always zero for now. */
     bits16 itemCount;	/* Number of items in block. */
 };
+
+int bwgSectionCmp(const void *va, const void *vb);
+/* Compare to sort based on chrom,start,end.  */
+
 void bwgSectionHeadFromMem(char **pPt, struct bwgSectionHead *head, boolean isSwapped);
 /* Read section header. */
 
@@ -578,4 +782,85 @@ size_t zUncompress(
 
 //end of zlibFace.h
 
+//begin of cheapcgi.h
+void cgiDecode(char *in, char *out, int inLength);
+/* Decode from cgi pluses-for-spaces format to normal.
+ * Out will be a little shorter than in typically. */
+//end of cheapcgi.h
+
+//begin of verbose.h
+void verbose(int verbosity, char *format, ...)
+/* Write printf formatted message to log (which by
+ * default is stderr) if global verbose variable
+ * is set to verbosity or higher. */
+#if defined(__GNUC__)
+__attribute__((format(printf, 2, 3)))
+#endif
+;
+//end of verbose.h
+
+
+//begin of hash.h
+
+struct hashEl
+/* An element in a hash list. */
+{
+    struct hashEl *next;
+    char *name;
+    void *val;
+    bits32 hashVal;
+};
+
+struct hash
+{
+    struct hash *next;	/* Next in list. */
+    bits32 mask;	/* Mask hashCrc with this to get it to fit table. */
+    struct hashEl **table;	/* Hash buckets. */
+    int powerOfTwoSize;		/* Size of table as a power of two. */
+    int size;			/* Size of table. */
+    struct lm *lm;	/* Local memory pool. */
+    int elCount;		/* Count of elements. */
+    boolean autoExpand;         /* Automatically expand hash */
+    float expansionFactor;      /* Expand when elCount > size*expansionFactor */
+    int numResizes;             /* number of times resize was called */
+};
+
+#define defaultExpansionFactor 1.0
+
+#define hashMaxSize 28
+
+struct hashCookie
+/* used by hashFirst/hashNext in tracking location in traversing hash */
+{
+    struct hash *hash;      /* hash we are associated with */
+    int idx;                /* current index in hash */
+    struct hashEl *nextEl;  /* current element in hash */
+};
+
+bits32 hashString(char *string);
+/* Compute a hash value of a string. */
+
+bits32 hashCrc(char *string);
+/* Returns a CRC value on string. */
+
+struct hashEl *hashLookup(struct hash *hash, char *name);
+/* Looks for name in hash table. Returns associated element,
+ * if found, or NULL if not.  If there are multiple entries
+ * for name, the last one added is returned (LIFO behavior).
+ */
+
+struct hashEl *hashAdd(struct hash *hash, char *name, void *val);
+int hashIntVal(struct hash *hash, char *name);
+/* Return integer value associated with name in a simple
+ * hash of ints. */
+struct hashCookie hashFirst(struct hash *hash);
+/* Return an object to use by hashNext() to traverse the hash table.
+ * The first call to hashNext will return the first entry in the table. */
+
+struct hashEl* hashNext(struct hashCookie *cookie);
+/* Return the next entry in the hash table, or NULL if no more. Do not modify
+ * hash table while this is being used. (see note in code if you want to fix
+ * this) */
+
+//end of hash.h
 #endif

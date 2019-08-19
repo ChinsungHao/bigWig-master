@@ -4,6 +4,7 @@
 */
 #include "bwg_new.h"
 #include "bwgExtra.h"
+#include "bw_query.h"
 
 typedef struct bbiFile bigWig_t;
 

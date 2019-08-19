@@ -1,4 +1,5 @@
 #include "bwgExtra.h"
+#include "bw_query.h"
 
 /* Adapted from Kent source (included jkweb folder) to not perform clipping */
 

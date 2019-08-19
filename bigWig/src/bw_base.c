@@ -1,5 +1,6 @@
 #include "bwg_new.h"
 #include "bw_base.h"
+#include "bw_query.h"
 
 int bw_has_chrom(bigWig_t * bw, const char * chromName) {
   struct bbiChromInfo * chrom, * chromList = bbiChromList(bw);

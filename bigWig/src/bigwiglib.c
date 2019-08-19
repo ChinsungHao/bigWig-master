@@ -1,4 +1,5 @@
 #include "bwg_new.h"
+#include "bw_query.h"
 
 
 int is_bigwig(char * filename) {
