@@ -201,6 +201,14 @@ struct cirTreeFile
 };
 
 void cirTreeFileDetach(struct cirTreeFile **pCrt);
+
+struct cirTreeRange
+/* A chromosome id and an interval inside it. */
+{
+    bits32 chromIx;	/* Chromosome id. */
+    bits32 start;	/* Start position in chromosome. */
+    bits32 end;		/* One past last base in interval in chromosome. */
+};
 //end of cirTree.h
 
 
@@ -355,6 +363,19 @@ struct bbiSummaryElement
 };
 
 struct bbiSummaryElement bbiTotalSummary(struct bbiFile *bbi);
+
+struct bbiSummaryOnDisk
+/* The part of the summary that ends up on disk - in the same order written to disk. */
+{
+    bits32 chromId;		/* ID of associated chromosome. */
+    bits32 start,end;		/* Range of chromosome covered. */
+    bits32 validCount;		/* Count of (bases) with actual data. */
+    float minVal;		/* Minimum value of items */
+    float maxVal;		/* Maximum value of items */
+    float sumData;		/* sum of values for each base. */
+    float sumSquares;		/* sum of squares for each base. */
+};
+
 struct bbiInterval
 /* Data on a single interval. */
 {
