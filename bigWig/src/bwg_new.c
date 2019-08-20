@@ -1375,7 +1375,7 @@ static struct errCatch **getStack()
 // A true integer has function would be nicer, but this will do.
 // Don't safef, theoretically that could abort.
     char key[64];
-    snprintf(key, sizeof(key), "%"PRIdMAX"",  ptrToLL(pid));
+    snprintf(key, sizeof(key), "%\"PRIdMAX\"",  ptrToLL(pid));
     key[ArraySize(key)-1] = '\0';
     if (perThreadStacks == NULL)
         perThreadStacks = hashNew(0);
@@ -1505,7 +1505,7 @@ static struct lmBlock *newBlock(struct lm *lm, size_t reqSize)
     size_t fullSize = size + sizeof(struct lmBlock);
     struct lmBlock *mb = needLargeZeroedMem(fullSize);
     if (mb == NULL)
-        errAbort("Couldn't allocate %"PRIdMAX" bytes", (intmax_t)fullSize);
+        errAbort("Couldn't allocate %\"PRIdMAX\" bytes", (intmax_t)fullSize);
     mb->free = (char *)(mb+1);
     mb->end = ((char *)mb) + fullSize;
     mb->next = lm->blocks;
@@ -1675,7 +1675,7 @@ void udcMustRead(struct udcFile *file, void *buf, bits64 size)
 {
     bits64 sizeRead = udcRead(file, buf, size);
     if (sizeRead < size)
-        errAbort("udc couldn't read %"PRIu64" bytes from %s, did read %"PRIu64"", size, file->url, sizeRead);
+        errAbort("udc couldn't read %\"PRIu64\" bytes from %s, did read %\"PRIu64\"", size, file->url, sizeRead);
 }
 bits64 udcTell(struct udcFile *file)
 /* Return current file position. */
@@ -2057,10 +2057,10 @@ void *needLargeMem(size_t size)
 {
     void *pt;
     if (size == 0 || size >= maxAlloc)
-        errAbort("needLargeMem: trying to allocate %"PRIuMAX" bytes (limit: %"PRIuMAX")",
+        errAbort("needLargeMem: trying to allocate %\"PRIuMAX\" bytes (limit: %\"PRIuMAX\")",
             (uintmax_t)size, (uintmax_t)maxAlloc);
     if ((pt = mhStack->alloc(size)) == NULL)
-        errAbort("needLargeMem: Out of memory - request size %"PRIuMAX" bytes, errno: %d\n",
+        errAbort("needLargeMem: Out of memory - request size %\"PRIuMAX\" bytes, errno: %d\n",
             (uintmax_t)size, errno);
     return pt;
 }
@@ -2080,10 +2080,10 @@ void *needLargeMemResize(void* vp, size_t size)
 {
     void *pt;
     if (size == 0 || size >= maxAlloc)
-        errAbort("needLargeMemResize: trying to allocate %"PRIuMAX" bytes (limit: %"PRIuMAX")",
+        errAbort("needLargeMemResize: trying to allocate %\"PRIuMAX\" bytes (limit: %\"PRIuMAX\")",
             (uintmax_t)size, (uintmax_t)maxAlloc);
     if ((pt = mhStack->realloc(vp, size)) == NULL)
-        errAbort("needLargeMemResize: Out of memory - request size %"PRIuMAX" bytes, errno: %d\n",
+        errAbort("needLargeMemResize: Out of memory - request size %\"PRIuMAX\" bytes, errno: %d\n",
             (uintmax_t)size, errno);
     return pt;
 }
@@ -2105,7 +2105,7 @@ void *needHugeMem(size_t size)
     if (size == 0)
         errAbort("needHugeMem: trying to allocate 0 bytes");
     if ((pt = mhStack->alloc(size)) == NULL)
-        errAbort("needHugeMem: Out of huge memory - request size %"PRIuMAX" bytes, errno: %d\n",
+        errAbort("needHugeMem: Out of huge memory - request size %\"PRIuMAX\" bytes, errno: %d\n",
             (uintmax_t)size, errno);
     return pt;
 }
@@ -2127,7 +2127,7 @@ void *needHugeMemResize(void* vp, size_t size)
 {
     void *pt;
     if ((pt = mhStack->realloc(vp, size)) == NULL)
-        errAbort("needHugeMemResize: Out of memory - request resize %"PRIuMAX" bytes, errno: %d\n",
+        errAbort("needHugeMemResize: Out of memory - request resize %\"PRIuMAX\" bytes, errno: %d\n",
             (uintmax_t)size, errno);
     return pt;
 }
@@ -2153,10 +2153,10 @@ void *needMem(size_t size)
 {
     void *pt;
     if (size == 0 || size > NEEDMEM_LIMIT)
-        errAbort("needMem: trying to allocate %"PRIuMAX" bytes (limit: %"PRIuMAX")",
+        errAbort("needMem: trying to allocate %\"PRIuMAX\" bytes (limit: %\"PRIuMAX\")",
             (uintmax_t)size, (uintmax_t)NEEDMEM_LIMIT);
     if ((pt = mhStack->alloc(size)) == NULL)
-        errAbort("needMem: Out of memory - request size %"PRIuMAX" bytes, errno: %d\n",
+        errAbort("needMem: Out of memory - request size %\"PRIuMAX\" bytes, errno: %d\n",
             (uintmax_t)size, errno);
     memset(pt, 0, size);
     return pt;
@@ -2421,7 +2421,7 @@ void mustWrite(FILE *file, void *buf, size_t size)
 {
     if (size != 0 && fwrite(buf, size, 1, file) != 1)
     {
-        errAbort("Error writing %"PRIdMAX" bytes: %s\n", (intmax_t)size, strerror(ferror(file)));
+        errAbort("Error writing %\"PRIdMAX\" bytes: %s\n", (intmax_t)size, strerror(ferror(file)));
     }
 }
 char *skipLeadingSpaces(char *s)
@@ -2686,7 +2686,7 @@ size_t zUncompress(
     uLongf uncSize = uncompBufSize;
     int err = uncompress(uncompBuf,  &uncSize, compressed, compressedSize);
     if (err != 0)
-        errAbort("Couldn't zUncompress %"PRIdMAX" bytes: %s",
+        errAbort("Couldn't zUncompress %\"PRIdMAX\" bytes: %s",
             (intmax_t)compressedSize, zlibErrorMessage(err));
     return uncSize;
 }

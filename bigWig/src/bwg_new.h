@@ -22,7 +22,9 @@
 #include <unistd.h>
 #include <ctype.h>
 #include <pthread.h>
+#include <inttypes.h>
 #include <zlib.h>
+
 
 
 #define TRUE 1
