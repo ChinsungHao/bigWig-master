@@ -240,6 +240,32 @@ struct lineFile *lineFileStdin(bool zTerm)
     return lineFileAttach("stdin", zTerm, fileno(stdin));
 }
 
+
+static void determineNlType(struct lineFile *lf, char *buf, int bufSize)
+/* determine type of newline used for the file, assumes buffer not empty */
+{
+    char *c = buf;
+    if (bufSize==0) return;
+    if (lf->nlType != nlt_undet) return;  /* if already determined just exit */
+    lf->nlType = nlt_unix;  /* start with default of unix lf type */
+    while (c < buf+bufSize)
+    {
+        if (*c=='\r')
+        {
+            lf->nlType = nlt_mac;
+            if (++c < buf+bufSize)
+                if (*c == '\n')
+                    lf->nlType = nlt_dos;
+            return;
+        }
+        if (*(c++) == '\n')
+        {
+            return;
+        }
+    }
+}
+
+
 boolean lineFileNext(struct lineFile *lf, char **retStart, int *retSize)
 /* Fetch next line from file. */
 {
@@ -1196,6 +1222,20 @@ struct chromNameCallbackContext
     boolean isSwapped;			/* Need to byte-swap things? */
 };
 
+static void chromNameCallback(void *context, void *key, int keySize, void *val, int valSize)
+/* Callback that captures chromInfo from bPlusTree. */
+{
+    struct chromNameCallbackContext *c = context;
+    struct bbiChromInfo *info;
+    struct bbiChromIdSize *idSize = val;
+    assert(valSize == sizeof(*idSize));
+    chromIdSizeHandleSwapped(c->isSwapped, idSize);
+    AllocVar(info);
+    info->name = cloneStringZ(key, keySize);
+    info->id = idSize->chromId;
+    info->size = idSize->chromSize;
+    slAddHead(&c->list, info);
+}
 
 struct bbiChromInfo *bbiChromList(struct bbiFile *bbi)
 /* Return list of chromosomes. */
@@ -1540,6 +1580,83 @@ void *lmAlloc(struct lm *lm, size_t size)
 //end of localmem.c
 
 //begin of udc.c
+struct connInfo
+/* Socket descriptor and associated info, for keeping net connections open. */
+{
+    int socket;                 /* Socket descriptor for data connection (or 0). */
+    bits64 offset;		/* Current file offset of socket. */
+    int ctrlSocket;             /* (FTP only) Control socket descriptor or 0. */
+};
+
+typedef int (*UdcDataCallback)(char *url, bits64 offset, int size, void *buffer,
+                               struct connInfo *ci);
+/* Type for callback function that fetches file data. */
+
+struct udcRemoteFileInfo
+/* Information about a remote file. */
+{
+    bits64 updateTime;	/* Last update in seconds since 1970 */
+    bits64 size;	/* Remote file size */
+    struct connInfo ci; /* Connection info for open net connection */
+};
+
+typedef boolean (*UdcInfoCallback)(char *url, struct udcRemoteFileInfo *retInfo);
+/* Type for callback function that fetches file timestamp and size. */
+
+struct udcProtocol
+/* Something to handle a communications protocol like http, https, ftp, local file i/o, etc. */
+{
+    struct udcProtocol *next;	/* Next in list */
+    UdcDataCallback fetchData;	/* Data fetcher */
+    UdcInfoCallback fetchInfo;	/* Timestamp & size fetcher */
+};
+
+struct udcFile
+/* A file handle for our caching system. */
+{
+    struct udcFile *next;	/* Next in list. */
+    char *url;			/* Name of file - includes protocol */
+    char *protocol;		/* The URL up to the first colon.  http: etc. */
+    struct udcProtocol *prot;	/* Protocol specific data and methods. */
+    time_t updateTime;		/* Last modified timestamp. */
+    bits64 size;		/* Size of file. */
+    bits64 offset;		/* Current offset in file. */
+    char *cacheDir;		/* Directory for cached file parts. */
+    char *bitmapFileName;	/* Name of bitmap file. */
+    char *sparseFileName;	/* Name of sparse data file. */
+    int fdSparse;		/* File descriptor for sparse data file. */
+    boolean sparseReadAhead;    /* Read-ahead has something in the buffer */
+    char *sparseReadAheadBuf;   /* Read-ahead buffer, if any */
+    bits64 sparseRAOffset;      /* Read-ahead buffer offset */
+    struct udcBitmap *bits;     /* udcBitMap */
+    bits64 startData;		/* Start of area in file we know to have data. */
+    bits64 endData;		/* End of area in file we know to have data. */
+    bits32 bitmapVersion;	/* Version of associated bitmap we were opened with. */
+    struct connInfo connInfo;   /* Connection info for open net connection. */
+};
+
+struct udcBitmap
+/* The control structure including the bitmap of blocks that are cached. */
+{
+    struct udcBitmap *next;	/* Next in list. */
+    bits32 blockSize;		/* Number of bytes per block of file. */
+    bits64 remoteUpdate;	/* Remote last update time. */
+    bits64 fileSize;		/* File size */
+    bits32 version;		/* Version - increments each time cache is stale. */
+    bits64 localUpdate;		/* Time we last fetched new data into cache. */
+    bits64 localAccess;		/* Time we last accessed data. */
+    boolean isSwapped;		/* If true need to swap all bytes on read. */
+    int fd;			/* File descriptor for file with current block. */
+};
+
+static char *defaultDir = "/tmp/udcCache";
+
+//char *udcDefaultDir()
+///* Get default directory for cache */
+//{
+//    return defaultDir;
+//}
+
 void udcSetDefaultDir(char *path)
 /* Set default directory for cache */
 {
@@ -1631,6 +1748,15 @@ bits64 udcReadBits64(struct udcFile *file, boolean isSwapped)
 //end of udc.c
 
 //begin of bits.c
+
+static Bits oneBit[8] = { 0x80, 0x40, 0x20, 0x10, 0x8, 0x4, 0x2, 0x1};
+static Bits leftMask[8] = {0xFF, 0x7F, 0x3F, 0x1F,  0xF,  0x7,  0x3,  0x1,};
+static Bits rightMask[8] = {0x80, 0xC0, 0xE0, 0xF0, 0xF8, 0xFC, 0xFE, 0xFF,};
+int bitsInByte[256];
+
+static boolean inittedBitsInByte = FALSE;
+
+
 boolean bitReadOne(Bits *b, int bitIx)
 /* Read a single bit. */
 {
@@ -1859,6 +1985,166 @@ lmCleanup(&lm);
 
 
 //begin of memalloc.c
+static void *defaultAlloc(size_t size)
+/* Default allocator. */
+{
+    return malloc(size);
+}
+
+static void defaultFree(void *vpt)
+/* Default deallocator. */
+{
+    free(vpt);
+}
+
+static void *defaultRealloc(void *vpt, size_t size)
+/* Default deallocator. */
+{
+    return realloc(vpt, size);
+}
+
+static struct memHandler defaultMemHandler =
+/* Default memory handler. */
+        {
+                NULL,
+                defaultAlloc,
+                defaultFree,
+                defaultRealloc,
+        };
+
+static struct memHandler *mhStack = &defaultMemHandler;
+
+struct memHandler *pushMemHandler(struct memHandler *newHandler)
+/* Use newHandler for memory requests until matching popMemHandler.
+ * Returns previous top of memory handler stack. */
+{
+    struct memHandler *oldHandler = mhStack;
+    slAddHead(&mhStack, newHandler);
+    return oldHandler;
+}
+
+
+struct memHandler *popMemHandler()
+/* Removes top element from memHandler stack and returns it. */
+{
+    struct memHandler *oldHandler = mhStack;
+    if (mhStack == &defaultMemHandler)
+        errAbort("Too many popMemHandlers()");
+    mhStack = mhStack->next;
+    return oldHandler;
+}
+
+
+void setDefaultMemHandler()
+/* Sets memHandler to the default. */
+{
+    mhStack = &defaultMemHandler;
+}
+
+/* 128*8*1024*1024 == 1073741824 == 2^30 on 32 bit machines,size_t == 4 bytes*/
+/* on 64 bit machines, size_t = 8 bytes, 2^30 * 2 * 2 * 2 * 2 = 2^34 == 16 Gb */
+static size_t maxAlloc = (size_t)128*8*1024*1024*(sizeof(size_t)/4)*(sizeof(size_t)/4)*(sizeof(size_t)/4*(sizeof(size_t)/4));
+
+void setMaxAlloc(size_t s)
+/* Set large allocation limit. */
+{
+    maxAlloc = s;
+}
+
+void *needLargeMem(size_t size)
+/* This calls abort if the memory allocation fails. The memory is
+ * not initialized to zero. */
+{
+    void *pt;
+    if (size == 0 || size >= maxAlloc)
+        errAbort("needLargeMem: trying to allocate %"PRIuMAX" bytes (limit: %"PRIuMAX")",
+            (uintmax_t)size, (uintmax_t)maxAlloc);
+    if ((pt = mhStack->alloc(size)) == NULL)
+        errAbort("needLargeMem: Out of memory - request size %"PRIuMAX" bytes, errno: %d\n",
+            (uintmax_t)size, errno);
+    return pt;
+}
+
+void *needLargeZeroedMem(size_t size)
+/* Request a large block of memory and zero it. */
+{
+    void *v;
+    v = needLargeMem(size);
+    memset(v, 0, size);
+    return v;
+}
+
+void *needLargeMemResize(void* vp, size_t size)
+/* Adjust memory size on a block, possibly relocating it.  If vp is NULL,
+ * a new memory block is allocated.  Memory not initted. */
+{
+    void *pt;
+    if (size == 0 || size >= maxAlloc)
+        errAbort("needLargeMemResize: trying to allocate %"PRIuMAX" bytes (limit: %"PRIuMAX")",
+            (uintmax_t)size, (uintmax_t)maxAlloc);
+    if ((pt = mhStack->realloc(vp, size)) == NULL)
+        errAbort("needLargeMemResize: Out of memory - request size %"PRIuMAX" bytes, errno: %d\n",
+            (uintmax_t)size, errno);
+    return pt;
+}
+
+void *needLargeZeroedMemResize(void* vp, size_t oldSize, size_t newSize)
+/* Adjust memory size on a block, possibly relocating it.  If vp is NULL, a
+ * new memory block is allocated.  If block is grown, new memory is zeroed. */
+{
+    void *v = needLargeMemResize(vp, newSize);
+    if (newSize > oldSize)
+        memset(((char*)v)+oldSize, 0, newSize-oldSize);
+    return v;
+}
+
+void *needHugeMem(size_t size)
+/* No checking on size.  Memory not initted. */
+{
+    void *pt;
+    if (size == 0)
+        errAbort("needHugeMem: trying to allocate 0 bytes");
+    if ((pt = mhStack->alloc(size)) == NULL)
+        errAbort("needHugeMem: Out of huge memory - request size %"PRIuMAX" bytes, errno: %d\n",
+            (uintmax_t)size, errno);
+    return pt;
+}
+
+
+void *needHugeZeroedMem(size_t size)
+/* Request a large block of memory and zero it. */
+{
+    void *v;
+    v = needHugeMem(size);
+    memset(v, 0, size);
+    return v;
+}
+
+void *needHugeMemResize(void* vp, size_t size)
+/* Adjust memory size on a block, possibly relocating it.  If vp is NULL,
+ * a new memory block is allocated.  No checking on size.  Memory not
+ * initted. */
+{
+    void *pt;
+    if ((pt = mhStack->realloc(vp, size)) == NULL)
+        errAbort("needHugeMemResize: Out of memory - request resize %"PRIuMAX" bytes, errno: %d\n",
+            (uintmax_t)size, errno);
+    return pt;
+}
+
+
+void *needHugeZeroedMemResize(void* vp, size_t oldSize, size_t newSize)
+/* Adjust memory size on a block, possibly relocating it.  If vp is NULL, a
+ * new memory block is allocated.  No checking on size.  If block is grown,
+ * new memory is zeroed. */
+{
+    void *v;
+    v = needHugeMemResize(vp, newSize);
+    if (newSize > oldSize)
+        memset(((char*)v)+oldSize, 0, newSize-oldSize);
+    return v;
+}
+
 #define NEEDMEM_LIMIT 500000000
 
 void *needMem(size_t size)
@@ -1875,21 +2161,76 @@ void *needMem(size_t size)
     memset(pt, 0, size);
     return pt;
 }
-
-
-void *needLargeMem(size_t size)
-/* This calls abort if the memory allocation fails. The memory is
- * not initialized to zero. */
-{
-    void *pt;
-    if (size == 0 || size >= maxAlloc)
-        errAbort("needLargeMem: trying to allocate %"PRIuMAX" bytes (limit: %"PRIuMAX")",
-            (uintmax_t)size, (uintmax_t)maxAlloc);
-    if ((pt = mhStack->alloc(size)) == NULL)
-        errAbort("needLargeMem: Out of memory - request size %"PRIuMAX" bytes, errno: %d\n",
-            (uintmax_t)size, errno);
-    return pt;
-}
+//
+//static void *defaultAlloc(size_t size)
+///* Default allocator. */
+//{
+//    return malloc(size);
+//}
+//
+//static void defaultFree(void *vpt)
+///* Default deallocator. */
+//{
+//    free(vpt);
+//}
+//
+//static void *defaultRealloc(void *vpt, size_t size)
+///* Default deallocator. */
+//{
+//    return realloc(vpt, size);
+//}
+//
+//static struct memHandler defaultMemHandler =
+///* Default memory handler. */
+//        {
+//                NULL,
+//                defaultAlloc,
+//                defaultFree,
+//                defaultRealloc,
+//        };
+//
+//static struct memHandler *mhStack = &defaultMemHandler;
+//
+//#define NEEDMEM_LIMIT 500000000
+//
+//void *needMem(size_t size)
+///* Need mem calls abort if the memory allocation fails. The memory
+// * is initialized to zero. */
+//{
+//    void *pt;
+//    if (size == 0 || size > NEEDMEM_LIMIT)
+//        errAbort("needMem: trying to allocate %"PRIuMAX" bytes (limit: %"PRIuMAX")",
+//            (uintmax_t)size, (uintmax_t)NEEDMEM_LIMIT);
+//    if ((pt = mhStack->alloc(size)) == NULL)
+//        errAbort("needMem: Out of memory - request size %"PRIuMAX" bytes, errno: %d\n",
+//            (uintmax_t)size, errno);
+//    memset(pt, 0, size);
+//    return pt;
+//}
+//
+///* 128*8*1024*1024 == 1073741824 == 2^30 on 32 bit machines,size_t == 4 bytes*/
+///* on 64 bit machines, size_t = 8 bytes, 2^30 * 2 * 2 * 2 * 2 = 2^34 == 16 Gb */
+//static size_t maxAlloc = (size_t)128*8*1024*1024*(sizeof(size_t)/4)*(sizeof(size_t)/4)*(sizeof(size_t)/4*(sizeof(size_t)/4));
+//
+//void setMaxAlloc(size_t s)
+///* Set large allocation limit. */
+//{
+//    maxAlloc = s;
+//}
+//
+//void *needLargeMem(size_t size)
+///* This calls abort if the memory allocation fails. The memory is
+// * not initialized to zero. */
+//{
+//    void *pt;
+//    if (size == 0 || size >= maxAlloc)
+//        errAbort("needLargeMem: trying to allocate %"PRIuMAX" bytes (limit: %"PRIuMAX")",
+//            (uintmax_t)size, (uintmax_t)maxAlloc);
+//    if ((pt = mhStack->alloc(size)) == NULL)
+//        errAbort("needLargeMem: Out of memory - request size %"PRIuMAX" bytes, errno: %d\n",
+//            (uintmax_t)size, errno);
+//    return pt;
+//}
 
 void freeMem(void *pt)
 /* Free memory will check for null before freeing. */
@@ -2154,6 +2495,176 @@ long bw_chrom_size(bigWig_t * bw, const char * chromName) {
 //end of bw_base.c
 
 //begin of errabort.c
+#define maxWarnHandlers 20
+#define maxAbortHandlers 12
+struct perThreadAbortVars
+/* per thread variables for abort and warn */
+{
+    boolean debugPushPopErr;        // generate stack dump on push/pop error
+    boolean errAbortInProgress;     /* Flag to indicate that an error abort is in progress.
+                                      * Needed so that a warn handler can tell if it's really
+                                      * being called because of a warning or an error. */
+    WarnHandler warnArray[maxWarnHandlers];
+    int warnIx;
+    AbortHandler abortArray[maxAbortHandlers];
+    int abortIx;
+};
+
+static struct perThreadAbortVars *getThreadVars();  // forward declaration
+
+static void defaultVaWarn(char *format, va_list args)
+/* Default error message handler. */
+{
+    if (format != NULL) {
+        fflush(stdout);
+        vfprintf(stderr, format, args);
+        fprintf(stderr, "\n");
+        fflush(stderr);
+    }
+}
+
+static void silentVaWarn(char *format, va_list args)
+/* Warning handler that just hides it.  Useful sometimes when high level code
+ * expects low level code may fail (as in finding a file on the net) but doesn't
+ * want user to be bothered about it. */
+{
+}
+
+
+void vaWarn(char *format, va_list args)
+/* Call top of warning stack to issue warning. */
+{
+    struct perThreadAbortVars *ptav = getThreadVars();
+    ptav->warnArray[ptav->warnIx](format, args);
+}
+
+void warn(char *format, ...)
+/* Issue a warning message. */
+{
+    va_list args;
+    va_start(args, format);
+    vaWarn(format, args);
+    va_end(args);
+}
+
+void warnWithBackTrace(char *format, ...)
+/* Issue a warning message and append backtrace. */
+{
+    va_list args;
+    va_start(args, format);
+    struct dyString *dy = newDyString(255);
+    dyStringAppend(dy, format);
+
+#define STACK_LIMIT 20
+    char **strings = NULL;
+    int count = 0;
+
+// developer: this is an occasionally useful means of getting stack info without crashing
+// however, it is not supported on cygwin.  Conditionally compile this in when desired.
+// The define is at top to include execinfo.h
+#ifdef BACKTRACE_EXISTS
+    void *buffer[STACK_LIMIT];
+count = backtrace(buffer, STACK_LIMIT);
+strings = backtrace_symbols(buffer, count);
+#endif///def BACKTRACE_EXISTS
+
+    if (strings == NULL)
+        dyStringAppend(dy,"\nno backtrace_symbols available in errabort::warnWithBackTrace().");
+    else
+    {
+        int ix = 1;
+        dyStringAppend(dy,"\nBACKTRACE (use on cmdLine):");
+        if (strings[1] != NULL)
+        {
+            strSwapChar(strings[1],' ','\0');
+            dyStringPrintf(dy,"\naddr2line -Cfise %s",strings[1]);
+            strings[1] += strlen(strings[1]) + 1;
+        }
+        for (; ix < count && strings[ix] != NULL; ix++)
+        {
+            strings[ix] = skipBeyondDelimit(strings[ix],'[');
+            strSwapChar(strings[ix],']','\0');
+            dyStringPrintf(dy," %s",strings[ix]);
+        }
+
+        free(strings);
+    }
+    vaWarn(dyStringCannibalize(&dy), args);
+    va_end(args);
+}
+
+
+void errnoWarn(char *format, ...)
+/* Prints error message from UNIX errno first, then does rest of warning. */
+{
+    char fbuf[512];
+    va_list args;
+    va_start(args, format);
+    sprintf(fbuf, "%s\n%s", strerror(errno), format);
+    vaWarn(fbuf, args);
+    va_end(args);
+}
+
+
+void pushWarnHandler(WarnHandler handler)
+/* Set abort handler */
+{
+    struct perThreadAbortVars *ptav = getThreadVars();
+    if (ptav->warnIx >= maxWarnHandlers-1)
+    {
+        if (ptav->debugPushPopErr)
+            dumpStack("pushWarnHandler overflow");
+        errAbort("Too many pushWarnHandlers, can only handle %d\n", maxWarnHandlers-1);
+    }
+    ptav->warnArray[++ptav->warnIx] = handler;
+}
+
+void popWarnHandler()
+/* Revert to old warn handler. */
+{
+    struct perThreadAbortVars *ptav = getThreadVars();
+    if (ptav->warnIx <= 0)
+    {
+        if (ptav->debugPushPopErr)
+            dumpStack("popWarnHandler underflow");
+        errAbort("Too few popWarnHandlers");
+    }
+    --ptav->warnIx;
+}
+
+static void defaultAbort()
+/* Default error handler exits program. */
+{
+    if ((getenv("ERRASSERT") != NULL) || (getenv("ERRABORT") != NULL))
+        abort();
+    else
+        exit(-1);
+}
+
+
+void noWarnAbort()
+/* Abort without message. */
+{
+    struct perThreadAbortVars *ptav = getThreadVars();
+    ptav->abortArray[ptav->abortIx]();
+    exit(-1);               /* This is just to make compiler happy.
+                         * We have already exited or longjmped by now. */
+}
+
+void vaErrAbort(char *format, va_list args)
+/* Abort function, with optional (vprintf formatted) error message. */
+{
+/* flag is needed because both errAbort and warn generate message
+ * using the warn handler, however sometimes one needed to know
+ * (like when logging), if it's an error or a warning.  This is far from
+ * perfect, as this isn't cleared if the error handler continues,
+ * as with an exception mechanism. */
+    struct perThreadAbortVars *ptav = getThreadVars();
+    ptav->errAbortInProgress = TRUE;
+    vaWarn(format, args);
+    noWarnAbort();
+}
+
 void errAbort(char *format, ...)
 /* Abort function, with optional (printf formatted) error message. */
 {
@@ -2164,7 +2675,7 @@ void errAbort(char *format, ...)
 }
 //end of errabort.c
 
-//begin of ziblibFace.c
+//begin of zlibFace.c
 size_t zUncompress(
         void *compressed,	/* Compressed area */
         size_t compressedSize,	/* Size after compression */
@@ -2179,7 +2690,7 @@ size_t zUncompress(
             (intmax_t)compressedSize, zlibErrorMessage(err));
     return uncSize;
 }
-//end of ziblibFace.c
+//end of zlibFace.c
 
 //begin of cirTree.c
 void cirTreeFileDetach(struct cirTreeFile **pCrt)
@@ -2365,20 +2876,20 @@ struct hashEl *hashAdd(struct hash *hash, char *name, void *val)
     return hashAddN(hash, name, strlen(name), val);
 }
 
-boolean hashMayRemove(struct hash *hash, char *name)
-/* Remove item of the given name from hash table, if present.
- * Return true if it was present */
-{
-    return (hashRemove(hash, name) != NULL);
-}
-
-void hashMustRemove(struct hash *hash, char *name)
-/* Remove item of the given name from hash table, or error
- * if not present */
-{
-    if (hashRemove(hash, name) == NULL)
-        errAbort("attempt to remove non-existant %s from hash", name);
-}
+//boolean hashMayRemove(struct hash *hash, char *name)
+///* Remove item of the given name from hash table, if present.
+// * Return true if it was present */
+//{
+//    return (hashRemove(hash, name) != NULL);
+//}
+//
+//void hashMustRemove(struct hash *hash, char *name)
+///* Remove item of the given name from hash table, or error
+// * if not present */
+//{
+//    if (hashRemove(hash, name) == NULL)
+//        errAbort("attempt to remove non-existant %s from hash", name);
+//}
 
 void freeHashEl(struct hashEl *hel)
 /* Free hash element. Use only on non-local memory version. */

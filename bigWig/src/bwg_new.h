@@ -21,6 +21,8 @@
 #include <errno.h>
 #include <unistd.h>
 #include <ctype.h>
+#include <pthread.h>
+#include <zlib.h>
 
 
 #define TRUE 1
@@ -69,6 +71,11 @@
 #define signed32 int32_t	      /* Wants to be signed 32 bits. */
 #define bits8 uint8_t   /* Wants to be unsigned 8 bits. */
 //#define SIGJMP_BUF jmp_buf
+
+#define AllocVar(pt) (pt = needMem(sizeof(*pt)))
+/* Shortcut to allocating a single variable on the heap and
+ * assigning pointer to it. */
+
 
 //begin of linefile.h
 enum nlType {
@@ -448,6 +455,81 @@ struct dyString
     int stringSize;		/* Size of string. */
 };
 
+struct dyString *newDyString(int initialBufSize);
+/* Allocate dynamic string with initial buffer size.  (Pass zero for default) */
+
+#define dyStringNew newDyString
+
+void freeDyString(struct dyString **pDs);
+/* Free up dynamic string. */
+
+#define dyStringFree(a) freeDyString(a);
+
+void freeDyStringList(struct dyString **pDs);
+/* Free up a list of dynamic strings */
+
+#define dyStringFreeList(a) freeDyStringList(a);
+
+void dyStringAppend(struct dyString *ds, char *string);
+/* Append zero terminated string to end of dyString. */
+
+void dyStringAppendN(struct dyString *ds, char *string, int stringSize);
+/* Append string of given size to end of string. */
+
+char dyStringAppendC(struct dyString *ds, char c);
+/* Append char to end of string. */
+
+void dyStringAppendMultiC(struct dyString *ds, char c, int n);
+/* Append N copies of char to end of string. */
+
+void dyStringAppendEscapeQuotes(struct dyString *dy, char *string,
+                                char quot, char esc);
+/* Append escaped-for-quotation version of string to dy. */
+
+#define dyStringWriteOne(dy, var) dyStringAppendN(dy, (char *)(&var), sizeof(var))
+/* Write one variable (binary!) to dyString - for cases when want to treat string like
+ * a file stream. */
+
+void dyStringVaPrintf(struct dyString *ds, char *format, va_list args);
+/* VarArgs Printf to end of dyString. */
+
+void dyStringPrintf(struct dyString *ds, char *format, ...)
+/*  Printf to end of dyString. */
+#ifdef __GNUC__
+__attribute__((format(printf, 2, 3)))
+#endif
+;
+
+struct dyString *dyStringCreate(char *format, ...);
+/*  Create a dyString with a printf style initial content */
+
+#define dyStringClear(ds) (ds->string[0] = ds->stringSize = 0)
+/* Clear string. */
+
+struct dyString * dyStringSub(char *orig, char *in, char *out);
+/* Make up a duplicate of orig with all occurences of in substituted
+ * with out. */
+
+void dyStringBumpBufSize(struct dyString *ds, int size);
+/* Force dyString buffer to be at least given size. */
+
+char *dyStringCannibalize(struct dyString **pDy);
+/* Kill dyString, but return the string it is wrapping
+ * (formerly dy->string).  This should be free'd at your
+ * convenience. */
+
+#define dyStringContents(ds) (ds)->string
+/* return raw string. */
+
+#define dyStringLen(ds) ds->stringSize
+/* return raw string length. */
+
+void dyStringResize(struct dyString *ds, int newSize);
+/* resize a string, if the string expands, blanks are appended */
+
+void dyStringQuoteString(struct dyString *dy, char quotChar, char *text);
+/* Append quotChar-quoted text (with any internal occurrences of quotChar
+ * \-escaped) onto end of dy. */
 //end of dyString.h
 
 
@@ -485,6 +567,9 @@ void *lmAlloc(struct lm *lm, size_t size);
 
 
 //begin of udc.h
+struct udcFile;
+/* Handle to a cached file.  Inside of structure mysterious unless you are udc.c. */
+
 void udcSetDefaultDir(char *path);
 
 void udcSeek(struct udcFile *file, bits64 offset);
@@ -701,6 +786,13 @@ __attribute__((format(printf, 3, 4)))
 #endif
 ;
 
+bits16 memReadBits16(char **pPt, boolean isSwapped);
+/* Read and optionally byte-swap 32 bit entity from memory buffer pointed to by
+ * *pPt, and advance *pPt past read area. */
+
+void *needMoreMem(void *old, size_t copySize, size_t newSize);
+/* Allocate a new buffer, copy old buffer to it, free old buffer. */
+
 char *skipLeadingSpaces(char *s);
 //end of common.h
 
@@ -786,12 +878,77 @@ long bw_chrom_size(bigWig_t * bw, const char * chromName);
 //end of bw_base.h
 
 //begin of errAbort.h
+boolean isErrAbortInProgress();
+/* Flag to indicate that an error abort is in progress.
+ * Needed so that a warn handler can tell if it's really
+ * being called because of a warning or an error. */
+
 void errAbort(char *format, ...)
 /* Abort function, with optional (printf formatted) error message. */
 #if defined(__GNUC__)
 __attribute__((format(printf, 1, 2)))
 #endif
 ;
+
+void vaErrAbort(char *format, va_list args);
+/* Abort function, with optional (vprintf formatted) error message. */
+
+void errnoAbort(char *format, ...)
+/* Prints error message from UNIX errno first, then does errAbort. */
+#if defined(__GNUC__)
+__attribute__((format(printf, 1, 2)))
+#endif
+;
+
+typedef void (*AbortHandler)();
+/* Function that can abort. */
+
+void pushAbortHandler(AbortHandler handler);
+/* Set abort handler */
+
+void popAbortHandler();
+/* Revert to old abort handler. */
+
+void noWarnAbort();
+/* Abort without message. */
+
+void pushDebugAbort();
+/* Push abort handler that will invoke debugger. */
+
+void vaWarn(char *format, va_list args);
+/* Call top of warning stack to issue warning. */
+
+void warn(char *format, ...)
+/* Issue a warning message. */
+#if defined(__GNUC__)
+__attribute__((format(printf, 1, 2)))
+#endif
+;
+
+void errnoWarn(char *format, ...)
+/* Prints error message from UNIX errno first, then does rest of warning. */
+#if defined(__GNUC__)
+__attribute__((format(printf, 1, 2)))
+#endif
+;
+
+typedef void (*WarnHandler)(char *format, va_list args);
+/* Function that can warn. */
+
+void pushWarnHandler(WarnHandler handler);
+/* Set warning handler */
+
+void popWarnHandler();
+/* Revert to old warn handler. */
+
+void pushWarnAbort();
+/* Push handler that will abort on warnings. */
+
+void pushSilentWarnHandler();
+/* Set warning handler to be quiet.  Do a popWarnHandler to restore. */
+
+void errAbortDebugnPushPopErr();
+/*  generate stack dump if there is a error in the push/pop functions */
 //end of errAbort.h
 
 
@@ -871,6 +1028,7 @@ struct hashEl *hashLookup(struct hash *hash, char *name);
  * if found, or NULL if not.  If there are multiple entries
  * for name, the last one added is returned (LIFO behavior).
  */
+void *hashRemove(struct hash *hash, char *name);
 
 struct hashEl *hashAdd(struct hash *hash, char *name, void *val);
 int hashIntVal(struct hash *hash, char *name);
@@ -884,6 +1042,17 @@ struct hashEl* hashNext(struct hashCookie *cookie);
 /* Return the next entry in the hash table, or NULL if no more. Do not modify
  * hash table while this is being used. (see note in code if you want to fix
  * this) */
-
 //end of hash.h
+
+//begin of memalloc.h
+struct memHandler
+{
+    struct memHandler *next;
+    void * (*alloc)(size_t size);
+    void (*free)(void *vpt);
+    void * (*realloc)(void* vpt, size_t size);
+};
+//end of memalloc.h
+
+
 #endif
