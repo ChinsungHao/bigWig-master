@@ -1159,22 +1159,6 @@ struct bbiFile *bbiFileOpen(char *fileName, bits32 sig, char *typeName)
     return bbi;
 }
 
-void bbiFileClose(struct bbiFile **pBwf)
-/* Close down a big wig/big bed file. */
-{
-    struct bbiFile *bwf = *pBwf;
-    if (bwf != NULL)
-    {
-        cirTreeFileDetach(&bwf->unzoomedCir);
-        slFreeList(&bwf->levelList);
-        slFreeList(&bwf->levelList);
-        bptFileDetach(&bwf->chromBpt);
-        udcFileClose(&bwf->udc);
-        freeMem(bwf->fileName);
-        freez(pBwf);
-    }
-}
-
 
 void bbiFileClose(struct bbiFile **pBwf)
 /* Close down a big wig/big bed file. */
@@ -1204,6 +1188,14 @@ struct fileOffsetSize *bbiOverlappingBlocks(struct bbiFile *bbi, struct cirTreeF
         *retChromId = idSize.chromId;
     return cirTreeFindOverlappingBlocks(ctf, idSize.chromId, start, end);
 }
+
+struct chromNameCallbackContext
+/* Some stuff that the bPlusTree traverser needs for context. */
+{
+    struct bbiChromInfo *list;		/* The list we are building. */
+    boolean isSwapped;			/* Need to byte-swap things? */
+};
+
 
 struct bbiChromInfo *bbiChromList(struct bbiFile *bbi)
 /* Return list of chromosomes. */
@@ -1333,6 +1325,43 @@ void errCatchFree(struct errCatch **pErrCatch)
     }
 }
 
+static struct errCatch **getStack()
+/* Return a pointer to the errCatch object stack for the current pthread. */
+{
+    static pthread_mutex_t getStackMutex = PTHREAD_MUTEX_INITIALIZER;
+    pthread_mutex_lock( &getStackMutex );
+    static struct hash *perThreadStacks = NULL;
+    pthread_t pid = pthread_self(); //  can be a pointer or a number
+// A true integer has function would be nicer, but this will do.
+// Don't safef, theoretically that could abort.
+    char key[64];
+    snprintf(key, sizeof(key), "%"PRIdMAX"",  ptrToLL(pid));
+    key[ArraySize(key)-1] = '\0';
+    if (perThreadStacks == NULL)
+        perThreadStacks = hashNew(0);
+    struct hashEl *hel = hashLookup(perThreadStacks, key);
+    if (hel == NULL)
+        hel = hashAdd(perThreadStacks, key, NULL);
+    pthread_mutex_unlock( &getStackMutex );
+    return (struct errCatch **)(&hel->val);
+}
+
+static void errCatchAbortHandler()
+/* semiAbort */
+{
+    struct errCatch **pErrCatchStack = getStack(), *errCatchStack = *pErrCatchStack;
+    errCatchStack->gotError = TRUE;
+    longjmp(errCatchStack->jmpBuf, -1);
+}
+
+static void errCatchWarnHandler(char *format, va_list args)
+/* Write an error to top of errCatchStack. */
+{
+    struct errCatch **pErrCatchStack = getStack(), *errCatchStack = *pErrCatchStack;
+    dyStringVaPrintf(errCatchStack->message, format, args);
+    dyStringAppendC(errCatchStack->message, '\n');
+}
+
 boolean errCatchPushHandlers(struct errCatch *errCatch)
 /* Push error handlers.  Not usually called directly. */
 {
@@ -1373,6 +1402,7 @@ boolean errCatchFinish(struct errCatch **pErrCatch)
     }
     return ok;
 }
+
 //end of errCatch.c
 
 //begin of bigwiglib.c

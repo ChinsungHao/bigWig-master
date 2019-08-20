@@ -20,6 +20,7 @@
 #include <fcntl.h>
 #include <errno.h>
 #include <unistd.h>
+#include <ctype.h>
 
 
 #define TRUE 1
@@ -292,6 +293,14 @@ struct bbiFile
     bits16 extraIndexCount; /* Number of extra indexes (on fields other than chrom,start,end */
     bits64 extraIndexListOffset;    /* Offset to list of extra indexes */
 };
+
+struct bbiChromIdSize
+/* We store an id/size pair in chromBpt bPlusTree */
+{
+    bits32 chromId;	/* Chromosome ID */
+    bits32 chromSize;	/* Chromosome Size */
+};
+
 
 struct bbiChromInfo
 /* Pair of a name and a 32-bit integer. Used to assign IDs to chromosomes. */
